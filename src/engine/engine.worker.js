@@ -1,0 +1,1174 @@
+// PlanTint engine worker: owns the drawing's pixels. Renders PDFs (MuPDF), decodes images,
+// builds the display tile pyramid, and runs fill / colour detection / colour removal / export.
+
+import UTIF from 'utif';
+import { zlibSync } from 'fflate';
+import * as IP from './imgproc.js';
+import { detectPaint, colourAt } from './detect.js';
+import { dashFor } from '../shared/linestyle.js';
+
+let mupdfPromise = null;
+const MU = () => (mupdfPromise ||= import('./vendor/mupdf/mupdf.js'));
+
+const E = {
+  gen: 0,
+  raster: null, W: 0, H: 0, dpi: 150,
+  levels: [],
+  TILE: 1024,
+  pdf: null,
+  pdfProbe: null,
+  pageIndex: 0,
+  dl: null, ib: null, pageScale: 1,
+  tiff: null,
+  img: null,
+  srcExt: '',
+  dt: null, dtKey: '',
+  gapMask: null, gapVer: 0,
+  rasterVer: 0,
+  scratch: null,
+  ops: new Map(),
+  found: new Map(),
+  walls: new Map(), wallMask: null, wallKey: '',
+  paper: [255, 255, 255],
+  ink: null,
+};
+
+const post = (msg, transfer) => self.postMessage(msg, transfer || []);
+
+function progressFor(id) {
+  let last = 0;
+  return (f, msg) => {
+    const now = performance.now();
+    if (now - last > 80 || f >= 1) { last = now; post({ id, progress: f, msg }); }
+  };
+}
+
+// ------------------------------------------------------------------ raster + tiles
+
+function freeRaster() {
+  if (E.dl) { try { E.dl.destroy(); } catch { /* ignore */ } E.dl = null; }
+  E.raster = null; E.levels = []; E.dt = null; E.dtKey = ''; E.scratch = null; E.gapMask = null;
+  E.ops.clear(); E.found.clear();
+  E.walls.clear(); E.wallMask = null; E.wallKey = '';
+  E.ink = null;
+}
+
+/** Existing markups act as walls for Fill: keeps a pixel mask of them, rebuilt only when they change. */
+function updateWalls(list) {
+  const { W, H } = E;
+  const keys = list.map((w) => w.key).join('|');
+  if (keys === E.wallKey && (E.wallMask || !list.length)) return;
+  const seen = new Set();
+  for (const w of list) {
+    seen.add(w.id);
+    const c = E.walls.get(w.id);
+    if (c && c.key === w.key) continue;
+    let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+    for (const r of w.rings) for (let i = 0; i < r.length; i += 2) {
+      if (r[i] < bx0) bx0 = r[i]; if (r[i] > bx1) bx1 = r[i];
+      if (r[i + 1] < by0) by0 = r[i + 1]; if (r[i + 1] > by1) by1 = r[i + 1];
+    }
+    const x0 = Math.max(0, Math.floor(bx0)), y0 = Math.max(0, Math.floor(by0));
+    const x1 = Math.min(W, Math.ceil(bx1)), y1 = Math.min(H, Math.ceil(by1));
+    if (x1 <= x0 || y1 <= y0) { E.walls.set(w.id, { key: w.key, x0: 0, y0: 0, w: 0, h: 0, mask: null }); continue; }
+    const mask = new Uint8Array((x1 - x0) * (y1 - y0));
+    IP.rasterizeRings(w.rings, x0, y0, x1 - x0, y1 - y0, mask);
+    E.walls.set(w.id, { key: w.key, x0, y0, w: x1 - x0, h: y1 - y0, mask });
+  }
+  for (const id of [...E.walls.keys()]) if (!seen.has(id)) E.walls.delete(id);
+  if (!list.length) E.wallMask = null;
+  else {
+    const M = E.wallMask && E.wallMask.length === W * H ? E.wallMask.fill(0) : new Uint8Array(W * H);
+    for (const c of E.walls.values()) {
+      if (!c.mask) continue;
+      for (let y = 0; y < c.h; y++) {
+        const o = (c.y0 + y) * W + c.x0, mo = y * c.w;
+        for (let x = 0; x < c.w; x++) if (c.mask[mo + x]) M[o + x] = 1;
+      }
+    }
+    E.wallMask = M;
+  }
+  E.wallKey = keys;
+}
+
+function buildLevels() {
+  E.levels = [{ w: E.W, h: E.H, data: E.raster }];
+  let prev = E.levels[0];
+  while (Math.max(prev.w, prev.h) > 640) {
+    const w = Math.ceil(prev.w / 2), h = Math.ceil(prev.h / 2);
+    const data = new Uint8ClampedArray(w * h * 4);
+    IP.reduce2x(prev.data, prev.w, prev.h, data, w, 0, 0, w, h);
+    const L = { w, h, data };
+    E.levels.push(L);
+    prev = L;
+  }
+}
+
+function updateLevels(x0, y0, x1, y1) {
+  let rx0 = x0, ry0 = y0, rx1 = x1, ry1 = y1;
+  for (let l = 1; l < E.levels.length; l++) {
+    const src = E.levels[l - 1], dst = E.levels[l];
+    rx0 = Math.floor(rx0 / 2); ry0 = Math.floor(ry0 / 2);
+    rx1 = Math.min(dst.w, Math.ceil(rx1 / 2)); ry1 = Math.min(dst.h, Math.ceil(ry1 / 2));
+    IP.reduce2x(src.data, src.w, src.h, dst.data, dst.w, rx0, ry0, rx1, ry1);
+  }
+}
+
+async function tileBitmap(L, tx, ty) {
+  const T = E.TILE;
+  const ver = E.rasterVer;
+  const x0 = tx * T, y0 = ty * T;
+  const w = Math.min(T, L.w - x0), h = Math.min(T, L.h - y0);
+  const buf = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    const s = ((y0 + y) * L.w + x0) * 4;
+    buf.set(L.data.subarray(s, s + w * 4), y * w * 4);
+  }
+  const bmp = await createImageBitmap(new ImageData(buf, w, h));
+  return { tx, ty, x: x0, y: y0, w, h, ver, bitmap: bmp };
+}
+
+/** Sends tiles of every level that intersect rect (level-0 pixels); rect null = everything. */
+async function sendTiles(gen, rect) {
+  const T = E.TILE;
+  for (let l = E.levels.length - 1; l >= 0; l--) {
+    const L = E.levels[l];
+    const f = 1 << l;
+    const cols = Math.ceil(L.w / T), rows = Math.ceil(L.h / T);
+    let c0 = 0, c1 = cols - 1, r0 = 0, r1 = rows - 1;
+    if (rect) {
+      c0 = Math.max(0, Math.floor(rect[0] / f / T)); c1 = Math.min(cols - 1, Math.floor((rect[2] - 1) / f / T));
+      r0 = Math.max(0, Math.floor(rect[1] / f / T)); r1 = Math.min(rows - 1, Math.floor((rect[3] - 1) / f / T));
+    }
+    let batch = [];
+    for (let ty = r0; ty <= r1; ty++) {
+      for (let tx = c0; tx <= c1; tx++) {
+        if (gen !== E.gen) return;
+        batch.push(await tileBitmap(L, tx, ty));
+        if (batch.length >= 6) {
+          post({ type: 'tiles', gen, level: l, levelW: L.w, levelH: L.h, tiles: batch }, batch.map((t) => t.bitmap));
+          batch = [];
+        }
+      }
+    }
+    if (batch.length) post({ type: 'tiles', gen, level: l, levelW: L.w, levelH: L.h, tiles: batch }, batch.map((t) => t.bitmap));
+  }
+  post({ type: 'tiles-done', gen });
+}
+
+/** Coarse map of how much line work each part of the sheet has (for placing the legend). */
+function inkGrid() {
+  const { W, H, raster } = E;
+  const cols = 96, cell = Math.max(1, Math.ceil(W / cols)), rows = Math.ceil(H / cell);
+  const ink = new Float32Array(cols * rows);
+  const cnt = new Uint32Array(cols * rows);
+  const pr = E.paper[0], pg = E.paper[1], pb = E.paper[2];
+  for (let y = 0; y < H; y += 2) {
+    const cy = (y / cell) | 0;
+    for (let x = 0; x < W; x += 2) {
+      const p = (y * W + x) * 4;
+      const i = cy * cols + ((x / cell) | 0);
+      cnt[i]++;
+      if (Math.abs(raster[p] - pr) + Math.abs(raster[p + 1] - pg) + Math.abs(raster[p + 2] - pb) > 60) ink[i]++;
+    }
+  }
+  for (let i = 0; i < ink.length; i++) ink[i] = cnt[i] ? ink[i] / cnt[i] : 1;
+  return { cols, rows, cell, ink };
+}
+
+function finishRaster(gen) {
+  E.paper = IP.estimatePaper(E.raster, E.W, E.H);
+  E.ink = inkGrid();
+  buildLevels();
+  E.rasterVer++;
+  E.dt = null; E.dtKey = '';
+  E.ops.clear(); E.found.clear();
+  E.gapMask = null;
+  sendTiles(gen, null);
+}
+
+function afterRasterChange(b) {
+  E.rasterVer++;
+  E.dtKey = '';
+  const x0 = Math.max(0, b[0]), y0 = Math.max(0, b[1]), x1 = Math.min(E.W, b[2]), y1 = Math.min(E.H, b[3]);
+  if (x1 <= x0 || y1 <= y0) return;
+  updateLevels(x0, y0, x1, y1);
+  sendTiles(E.gen, [x0, y0, x1, y1]);
+}
+
+function rgbToRgba(px, stride, n, w, h, dst, dstOffsetRow, dstW) {
+  for (let y = 0; y < h; y++) {
+    let s = y * stride;
+    let d = ((dstOffsetRow + y) * dstW) * 4;
+    if (n === 3) {
+      for (let x = 0; x < w; x++, s += 3, d += 4) { dst[d] = px[s]; dst[d + 1] = px[s + 1]; dst[d + 2] = px[s + 2]; dst[d + 3] = 255; }
+    } else if (n === 1) {
+      for (let x = 0; x < w; x++, s += 1, d += 4) { const v = px[s]; dst[d] = v; dst[d + 1] = v; dst[d + 2] = v; dst[d + 3] = 255; }
+    } else {
+      for (let x = 0; x < w; x++, s += n, d += 4) { dst[d] = px[s]; dst[d + 1] = px[s + 1]; dst[d + 2] = px[s + 2]; dst[d + 3] = 255; }
+    }
+  }
+}
+
+// ------------------------------------------------------------------ PDF
+
+async function pixmapToBitmap(pix) {
+  const w = pix.getWidth(), h = pix.getHeight();
+  const buf = new Uint8ClampedArray(w * h * 4);
+  rgbToRgba(pix.getPixels(), pix.getStride(), pix.getNumberOfComponents(), w, h, buf, 0, w);
+  return createImageBitmap(new ImageData(buf, w, h));
+}
+
+const H_ = {};
+
+H_.openPdf = async ({ bytes }) => {
+  const mupdf = await MU();
+  if (E.pdfProbe && E.pdfProbe !== E.pdf) { try { E.pdfProbe.destroy(); } catch { /* ignore */ } }
+  E.pdfProbe = null;
+  let doc;
+  try { doc = mupdf.Document.openDocument(bytes, 'application/pdf'); } catch {
+    throw new Error('This file could not be read as a PDF. It may be damaged.');
+  }
+  if (doc.needsPassword()) throw new Error('This PDF is password-protected. Remove the password, then open it again.');
+  const n = doc.countPages();
+  if (!n) throw new Error('This PDF has no pages.');
+  const pages = [];
+  for (let i = 0; i < n; i++) {
+    const p = doc.loadPage(i);
+    const b = p.getBounds();
+    let label = '';
+    try { label = p.getLabel() || ''; } catch { /* ignore */ }
+    pages.push({ w: b[2] - b[0], h: b[3] - b[1], label });
+    p.destroy();
+  }
+  E.pdfProbe = doc;
+  return { pageCount: n, pages };
+};
+
+H_.pdfThumb = async ({ index, max }) => {
+  const mupdf = await MU();
+  const page = (E.pdfProbe || E.pdf).loadPage(index);
+  const b = page.getBounds();
+  const s = max / Math.max(b[2] - b[0], b[3] - b[1]);
+  const pix = page.toPixmap(mupdf.Matrix.scale(s, s), mupdf.ColorSpace.DeviceRGB, false, true);
+  const bmp = await pixmapToBitmap(pix);
+  pix.destroy(); page.destroy();
+  return { result: bmp, transfer: [bmp] };
+};
+
+H_.loadPdfPage = async ({ index, dpi, gen }, id) => {
+  const mupdf = await MU();
+  const prog = progressFor(id);
+  E.gen = gen;
+  freeRaster();
+  if (E.pdfProbe) {
+    if (E.pdf && E.pdf !== E.pdfProbe) { try { E.pdf.destroy(); } catch { /* ignore */ } }
+    E.pdf = E.pdfProbe;
+    E.pdfProbe = null;
+  }
+  E.pageIndex = index;
+  E.srcExt = 'pdf';
+  const page = E.pdf.loadPage(index);
+  const b = page.getBounds();
+  const s = dpi / 72;
+  const M = mupdf.Matrix.scale(s, s);
+  const ib = [Math.floor(b[0] * s + 1e-3), Math.floor(b[1] * s + 1e-3), Math.ceil(b[2] * s - 1e-3), Math.ceil(b[3] * s - 1e-3)];
+  const W = ib[2] - ib[0], H = ib[3] - ib[1];
+  E.W = W; E.H = H; E.dpi = dpi;
+  E.raster = new Uint8ClampedArray(W * H * 4);
+  prog(0.02, 'Reading the page');
+  const dl = page.toDisplayList(true);
+  const BAND = Math.max(32, Math.floor(12e6 / W));
+  for (let y = 0; y < H; y += BAND) {
+    const bh = Math.min(BAND, H - y);
+    const pix = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [ib[0], ib[1] + y, ib[2], ib[1] + y + bh], false);
+    pix.clear(255);
+    const dev = new mupdf.DrawDevice(M, pix);
+    dl.run(dev, mupdf.Matrix.identity);
+    dev.close(); dev.destroy();
+    rgbToRgba(pix.getPixels(), pix.getStride(), pix.getNumberOfComponents(), W, bh, E.raster, y, W);
+    pix.destroy();
+    prog(0.05 + 0.85 * ((y + bh) / H), 'Rendering at ' + dpi + ' dpi');
+  }
+  E.dl = dl; E.ib = ib; E.pageScale = s; // kept for sharp re-rendering when zoomed in
+  const text = [];
+  try {
+    const st = page.toStructuredText('preserve-whitespace');
+    const j = JSON.parse(st.asJSON());
+    st.destroy();
+    for (const block of j.blocks || []) {
+      if (block.type !== 'text') continue;
+      for (const line of block.lines || []) {
+        const t = (line.text || '').replace(/\s+/g, ' ').trim();
+        if (!t) continue;
+        const bb = line.bbox;
+        text.push({ t, x0: bb.x * s - ib[0], y0: bb.y * s - ib[1], x1: (bb.x + bb.w) * s - ib[0], y1: (bb.y + bb.h) * s - ib[1], size: ((line.font && line.font.size) || 0) * s });
+      }
+    }
+  } catch { /* no text layer */ }
+  page.destroy();
+  prog(0.95, 'Preparing the view');
+  finishRaster(gen);
+  return { W, H, dpi, pageSizePt: [b[2] - b[0], b[3] - b[1]], text, paper: E.paper, levels: E.levels.map((l) => [l.w, l.h]) };
+};
+
+// ------------------------------------------------------------------ sharp zoom (PDF vectors re-rendered at screen resolution)
+
+H_.renderRegion = async ({ x0, y0, x1, y1, k, gen }) => {
+  if (!E.dl || !E.ib || gen !== E.gen) return null;
+  // colour taken out of the drawing exists only in the pixels: keep showing those there
+  for (const op of E.ops.values()) {
+    if (!op.applied) continue;
+    for (const p of op.parts) if (!(p.x0 + p.w < x0 || p.x0 > x1 || p.y0 + p.h < y0 || p.y0 > y1)) return null;
+  }
+  const mupdf = await MU();
+  const bx0 = Math.floor((x0 + E.ib[0]) * k), by0 = Math.floor((y0 + E.ib[1]) * k);
+  const bx1 = Math.ceil((x1 + E.ib[0]) * k), by1 = Math.ceil((y1 + E.ib[1]) * k);
+  const w = bx1 - bx0, h = by1 - by0;
+  if (w <= 0 || h <= 0 || w * h > 40e6) return null;
+  const pix = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [bx0, by0, bx1, by1], false);
+  pix.clear(255);
+  const dev = new mupdf.DrawDevice(mupdf.Matrix.scale(E.pageScale * k, E.pageScale * k), pix);
+  E.dl.run(dev, mupdf.Matrix.identity);
+  dev.close(); dev.destroy();
+  const bmp = await pixmapToBitmap(pix);
+  pix.destroy();
+  if (gen !== E.gen) { bmp.close(); return null; }
+  return { result: { bitmap: bmp, rect: [bx0 / k - E.ib[0], by0 / k - E.ib[1], bx1 / k - E.ib[0], by1 / k - E.ib[1]], k, ver: E.rasterVer }, transfer: [bmp] };
+};
+
+// ------------------------------------------------------------------ images
+
+function readU16(b, o, le) { return le ? b[o] | (b[o + 1] << 8) : (b[o] << 8) | b[o + 1]; }
+function readU32(b, o) { return ((b[o] << 24) >>> 0) + (b[o + 1] << 16) + (b[o + 2] << 8) + b[o + 3]; }
+
+function imageDpi(bytes, ext) {
+  try {
+    if (ext === 'png') {
+      let o = 8;
+      while (o + 8 < bytes.length) {
+        const len = readU32(bytes, o);
+        const type = String.fromCharCode(bytes[o + 4], bytes[o + 5], bytes[o + 6], bytes[o + 7]);
+        if (type === 'pHYs') {
+          const ppu = readU32(bytes, o + 8);
+          if (bytes[o + 16] === 1 && ppu > 0) return Math.round(ppu * 0.0254);
+          return 0;
+        }
+        if (type === 'IDAT') return 0;
+        o += 12 + len;
+      }
+    } else if (ext === 'jpg' || ext === 'jpeg') {
+      if (bytes[2] === 0xff && bytes[3] === 0xe0 && bytes[6] === 0x4a && bytes[7] === 0x46) {
+        const units = bytes[13];
+        const xd = readU16(bytes, 14, false);
+        if (units === 1 && xd > 1) return xd;
+        if (units === 2 && xd > 1) return Math.round(xd * 2.54);
+      }
+    }
+  } catch { /* ignore */ }
+  return 0;
+}
+
+function tiffDpi(ifd) {
+  const xr = ifd.t282, unit = ifd.t296 ? ifd.t296[0] : 2;
+  if (!xr) return 0;
+  let v = Array.isArray(xr) ? xr[0] : xr;
+  if (Array.isArray(v)) v = v[0] / (v[1] || 1);
+  if (!(v > 1)) return 0;
+  return Math.round(unit === 3 ? v * 2.54 : v);
+}
+
+/** Converts a decoded TIFF page to RGBA, box-downscaled by an integer factor k. */
+function tiffToRgba(ifd, k) {
+  const w = ifd.width, h = ifd.height;
+  const W = Math.ceil(w / k), H = Math.ceil(h / k);
+  const out = new Uint8ClampedArray(W * H * 4);
+  const bps = ifd.t258 ? ifd.t258[0] : 1;
+  const spp = ifd.t277 ? ifd.t277[0] : 1;
+  const photo = ifd.t262 ? ifd.t262[0] : 1;
+  const planar = ifd.t284 ? ifd.t284[0] : 1;
+  const data = ifd.data;
+  const simple = planar === 1 && ((bps === 1 && spp === 1 && (photo === 0 || photo === 1)) || (bps === 8 && (spp === 1 || spp === 3 || spp === 4) && (photo === 0 || photo === 1 || photo === 2)));
+  if (!simple) {
+    const rgba = UTIF.toRGBA8(ifd);
+    const acc = new Float64Array(W * H * 3), cnt = new Uint32Array(W * H);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const s = (y * w + x) * 4, a = rgba[s + 3] / 255, d = ((y / k | 0) * W + (x / k | 0));
+      acc[d * 3] += rgba[s] * a + 255 * (1 - a); acc[d * 3 + 1] += rgba[s + 1] * a + 255 * (1 - a); acc[d * 3 + 2] += rgba[s + 2] * a + 255 * (1 - a); cnt[d]++;
+    }
+    for (let i = 0; i < W * H; i++) { const c = cnt[i] || 1; out[i * 4] = acc[i * 3] / c; out[i * 4 + 1] = acc[i * 3 + 1] / c; out[i * 4 + 2] = acc[i * 3 + 2] / c; out[i * 4 + 3] = 255; }
+    return { rgba: out, W, H };
+  }
+  const acc = new Uint32Array(W * H * 3), cnt = new Uint16Array(W * H);
+  if (bps === 1) {
+    const rowBytes = Math.ceil(w / 8);
+    const white = photo === 0 ? 0 : 1; // photometric 0: a 0 bit is white
+    for (let y = 0; y < h; y++) {
+      const ro = y * rowBytes, dy = (y / k | 0) * W;
+      for (let x = 0; x < w; x++) {
+        const bit = (data[ro + (x >> 3)] >> (7 - (x & 7))) & 1;
+        const v = bit === white ? 255 : 0;
+        const d = dy + (x / k | 0);
+        acc[d * 3] += v; acc[d * 3 + 1] += v; acc[d * 3 + 2] += v; cnt[d]++;
+      }
+    }
+  } else {
+    for (let y = 0; y < h; y++) {
+      const dy = (y / k | 0) * W;
+      for (let x = 0; x < w; x++) {
+        const s = (y * w + x) * spp, d = dy + (x / k | 0);
+        let r, g, b;
+        if (spp === 1) { r = g = b = photo === 0 ? 255 - data[s] : data[s]; }
+        else { r = data[s]; g = data[s + 1]; b = data[s + 2]; if (spp === 4) { const a = data[s + 3] / 255; r = r * a + 255 * (1 - a); g = g * a + 255 * (1 - a); b = b * a + 255 * (1 - a); } }
+        acc[d * 3] += r; acc[d * 3 + 1] += g; acc[d * 3 + 2] += b; cnt[d]++;
+      }
+    }
+  }
+  for (let i = 0; i < W * H; i++) { const c = cnt[i] || 1; out[i * 4] = acc[i * 3] / c; out[i * 4 + 1] = acc[i * 3 + 1] / c; out[i * 4 + 2] = acc[i * 3 + 2] / c; out[i * 4 + 3] = 255; }
+  return { rgba: out, W, H };
+}
+
+H_.probeImage = async ({ bytes, ext }) => {
+  E.tiff = null;
+  if (E.img) { try { E.img.close(); } catch { /* ignore */ } E.img = null; }
+  if (ext === 'tif' || ext === 'tiff') {
+    const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    let ifds;
+    try { ifds = UTIF.decode(buf); } catch { throw new Error('This TIFF file could not be read. It may be damaged.'); }
+    const pages = ifds.filter((f) => f.t256 && f.t257);
+    if (!pages.length) throw new Error('This TIFF file has no readable pages.');
+    E.tiff = { buf, pages };
+    return { pageCount: pages.length, pages: pages.map((f) => ({ w: f.t256[0], h: f.t257[0] })), dpi: tiffDpi(pages[0]) };
+  }
+  let bmp;
+  try {
+    bmp = await createImageBitmap(new Blob([bytes]), { colorSpaceConversion: 'none', premultiplyAlpha: 'none', imageOrientation: 'from-image' });
+  } catch {
+    throw new Error('This picture could not be read. Use PNG, JPEG, TIFF, BMP, GIF or WebP.');
+  }
+  E.img = bmp;
+  return { pageCount: 1, pages: [{ w: bmp.width, h: bmp.height }], dpi: imageDpi(bytes, ext) };
+};
+
+function decodeTiffPage(index) {
+  const ifd = E.tiff.pages[index];
+  if (!ifd.data) UTIF.decodeImage(E.tiff.buf, ifd, E.tiff.pages);
+  ifd.width = ifd.width || ifd.t256[0];
+  ifd.height = ifd.height || ifd.t257[0];
+  return ifd;
+}
+
+H_.imageThumb = async ({ index, max }) => {
+  let src;
+  if (E.tiff) {
+    const ifd = decodeTiffPage(index);
+    const k = Math.max(1, Math.floor(Math.max(ifd.width, ifd.height) / (max * 2)));
+    const r = tiffToRgba(ifd, k);
+    src = await createImageBitmap(new ImageData(r.rgba, r.W, r.H));
+  } else src = E.img;
+  const s = max / Math.max(src.width, src.height);
+  const w = Math.max(1, Math.round(src.width * s)), h = Math.max(1, Math.round(src.height * s));
+  const c = new OffscreenCanvas(w, h);
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(src, 0, 0, w, h);
+  const bmp = c.transferToImageBitmap();
+  return { result: bmp, transfer: [bmp] };
+};
+
+H_.loadImagePage = async ({ index, gen, maxPixels, ext }, id) => {
+  const prog = progressFor(id);
+  E.gen = gen;
+  freeRaster();
+  if (E.pdf) { try { E.pdf.destroy(); } catch { /* ignore */ } E.pdf = null; }
+  E.srcExt = ext || '';
+  prog(0.05, 'Decoding the picture');
+  let downscaled = false;
+  if (E.tiff) {
+    const ifd = decodeTiffPage(index);
+    const px = ifd.width * ifd.height;
+    const k = px > maxPixels ? Math.ceil(Math.sqrt(px / maxPixels)) : 1;
+    downscaled = k > 1;
+    const r = tiffToRgba(ifd, k);
+    ifd.data = null; // free decoded page
+    E.raster = r.rgba; E.W = r.W; E.H = r.H;
+  } else {
+    const bmp = E.img;
+    let W = bmp.width, H = bmp.height;
+    if (W * H > maxPixels) { const s = Math.sqrt(maxPixels / (W * H)); W = Math.floor(W * s); H = Math.floor(H * s); downscaled = true; }
+    const c = new OffscreenCanvas(W, H);
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+    ctx.imageSmoothingEnabled = downscaled;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(bmp, 0, 0, W, H);
+    E.raster = ctx.getImageData(0, 0, W, H).data;
+    E.W = W; E.H = H;
+  }
+  prog(0.9, 'Preparing the view');
+  finishRaster(gen);
+  return { W: E.W, H: E.H, paper: E.paper, downscaled, levels: E.levels.map((l) => [l.w, l.h]) };
+};
+
+H_.setDpi = ({ dpi }) => { if (dpi > 0) E.dpi = dpi; return true; };
+
+// ------------------------------------------------------------------ queries
+
+H_.sample = ({ x, y }) => {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  let r = 0, g = 0, b = 0, n = 0;
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const px = ix + dx, py = iy + dy;
+    if (px < 0 || py < 0 || px >= E.W || py >= E.H) continue;
+    const p = (py * E.W + px) * 4;
+    r += E.raster[p]; g += E.raster[p + 1]; b += E.raster[p + 2]; n++;
+  }
+  if (!n) return null;
+  return [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
+};
+
+H_.colourAt = ({ x, y }) => (E.raster ? colourAt(E.raster, E.W, E.H, x, y, E.paper) : null);
+
+H_.snapLines = ({ x, y, r }) => (E.raster ? IP.snapEdges(E.raster, E.W, E.H, x, y, Math.max(3, Math.round(r)), E.paper) : { xs: [], ys: [] });
+
+H_.setGaps = ({ lines }) => {
+  if (!E.raster) return true;
+  if (!lines.length) E.gapMask = null;
+  else {
+    const m = E.gapMask && E.gapMask.length === E.W * E.H ? E.gapMask.fill(0) : new Uint8Array(E.W * E.H);
+    const rad = Math.max(1.25, E.dpi / 220);
+    for (const pts of lines) {
+      for (let i = 0; i + 3 < pts.length; i += 2) IP.drawThickLine(m, E.W, E.H, pts[i], pts[i + 1], pts[i + 2], pts[i + 3], rad);
+    }
+    E.gapMask = m;
+  }
+  E.gapVer++;
+  return true;
+};
+
+H_.flood = ({ x, y, tol, gapPx, cover, holeRatio, tuck, walls, force, leakShare = 0.4 }) => {
+  const { W, H } = E;
+  const ix = Math.floor(x), iy = Math.floor(y);
+  if (ix < 0 || iy < 0 || ix >= W || iy >= H) return { error: 'outside' };
+  const p = (iy * W + ix) * 4;
+  const r = E.raster[p], g = E.raster[p + 1], b = E.raster[p + 2];
+  if (0.3 * r + 0.59 * g + 0.11 * b < 70) return { error: 'line' };
+  const q = (v) => Math.min(255, (v & ~7) + 4);
+  const sr = q(r), sg = q(g), sb = q(b);
+  const key = `${sr},${sg},${sb},${tol},${E.gapVer},${E.rasterVer}`;
+  if (E.dtKey !== key) {
+    E.dt = IP.barrierDistance(E.raster, W, H, sr, sg, sb, tol, E.gapMask, E.dt);
+    E.dtKey = key;
+  }
+  const dt = E.dt;
+  const si = iy * W + ix;
+  if (dt[si] === 0) return { error: 'line' };
+  updateWalls(walls || []);
+  const wall = E.wallMask;
+  if (wall && wall[si]) return { error: 'covered' };
+  let thr = Math.min(gapPx | 0, 250);
+  while (thr > 0 && dt[si] <= thr) thr--;
+  if (!E.scratch || E.scratch.length !== W * H) E.scratch = new Uint8Array(W * H);
+  const R = E.scratch;
+  const st = IP.floodFill(dt, W, H, ix, iy, thr, R, wall);
+  if (!force && st.area > leakShare * W * H) {
+    IP.clearRect(R, W, st.x0, st.y0, st.x1 - st.x0 + 1, st.y1 - st.y0 + 1);
+    return { leak: true, share: st.area / (W * H) };
+  }
+  const pad = thr + tuck + 3;
+  const wx0 = Math.max(0, st.x0 - pad), wy0 = Math.max(0, st.y0 - pad);
+  const wx1 = Math.min(W - 1, st.x1 + pad), wy1 = Math.min(H - 1, st.y1 + pad);
+  const w = wx1 - wx0 + 1, h = wy1 - wy0 + 1;
+  let m = IP.cropMask(R, W, wx0, wy0, w, h);
+  IP.clearRect(R, W, st.x0, st.y0, st.x1 - st.x0 + 1, st.y1 - st.y0 + 1);
+  if (thr > 0) {
+    m = IP.dilate(m, w, h, thr);
+    for (let yy = 0; yy < h; yy++) {
+      const ro = (wy0 + yy) * W + wx0;
+      for (let xx = 0; xx < w; xx++) if (m[yy * w + xx] && (dt[ro + xx] === 0 || (wall && wall[ro + xx]))) m[yy * w + xx] = 0;
+    }
+  }
+  const baseArea = IP.countMask(m);
+  if (cover && w * h < 30e6) {
+    // furniture against a wall (counters, wardrobes, beds) leaves pockets that touch the wall,
+    // so they are not holes. Take in any small pocket that is cut off from the room only by
+    // thin lines, not by walls.
+    const d = Math.max(2, Math.round((0.2 / 25.4) * E.dpi));
+    const added = IP.absorbPockets(m, w, h, (i) => {
+      const yy = (i / w) | 0, xx = i - yy * w;
+      const j = (wy0 + yy) * W + wx0 + xx;
+      return dt[j] >= 1 && !(wall && wall[j]);
+    }, d, baseArea * holeRatio);
+    if (added) m = IP.erode(IP.dilate(m, w, h, d), w, h, d).map((v, i) => v | m[i]);
+  }
+  const maxHole = cover ? baseArea * holeRatio : Math.max(6, (2 * tuck + 2) ** 2);
+  IP.fillHoles(m, w, h, (area) => area <= maxHole);
+  if (tuck > 0) m = IP.dilate(m, w, h, tuck);
+  const rings = IP.maskToRings(m, w, h, wx0, wy0, 0.9, 4);
+  return { rings, area: IP.countMask(m), bbox: [wx0, wy0, wx1 + 1, wy1 + 1], gapUsed: thr, seed: [r, g, b], sheetArea: W * H };
+};
+
+// ------------------------------------------------------------------ painted colour
+
+const norm = (c) => c.map((v, i) => Math.min(255, (v * 255) / Math.max(E.paper[i], 1)));
+const MATCH_DIST = [18, 30, 46];
+const TARGET_TOL = [16, 26, 40];
+
+H_.detect = ({ minAreaPx, match = 1, hatch = false, targets = [] }, id) => {
+  const prog = progressFor(id);
+  const cell = Math.max(2, Math.round(E.dpi / 110));
+  const mergeDist = MATCH_DIST[match] || 30;
+  const hatchPx = Math.round((2.5 / 25.4) * E.dpi);
+  const base = { paper: E.paper, minAreaPx, cell, mergeDist, hatch, hatchPx };
+  const nT = targets.length;
+  const res = detectPaint(E.raster, E.W, E.H, { ...base, progress: (f) => prog(f * (nT ? 0.6 : 1), 'Looking for painted colour') });
+  const groups = res.groups;
+  targets.forEach((t, ti) => {
+    const tn = norm(t);
+    const hit = groups.find((g) => { const gn = norm(g.color); return Math.hypot(gn[0] - tn[0], gn[1] - tn[1], gn[2] - tn[2]) <= mergeDist; });
+    if (hit) { hit.picked = true; return; }
+    const tr = detectPaint(E.raster, E.W, E.H, { ...base, target: t, targetTol: TARGET_TOL[match] || 26, progress: (f) => prog(0.6 + (0.4 * (ti + f)) / nT, 'Looking for the colour you picked') });
+    for (const g of tr.groups) { g.picked = true; groups.push(g); }
+  });
+  E.found.clear();
+  let rid = 0;
+  return {
+    groups: groups.map((g, gi) => ({
+      key: gi + 1, color: g.color, liftColor: g.liftColor, area: g.area, picked: !!g.picked,
+      regions: g.regions.map((r) => { const k = ++rid; E.found.set(k, r.part); return { rid: k, rings: r.rings, area: r.area, bbox: r.bbox, hatch: !!r.hatch }; }),
+    })),
+  };
+};
+
+// ------------------------------------------------------------------ colour removal ops
+
+function opBBox(parts) {
+  const b = [Infinity, Infinity, -Infinity, -Infinity];
+  for (const p of parts) { b[0] = Math.min(b[0], p.x0); b[1] = Math.min(b[1], p.y0); b[2] = Math.max(b[2], p.x0 + p.w); b[3] = Math.max(b[3], p.y0 + p.h); }
+  return b;
+}
+
+function partFromData(p) {
+  return { x0: p.x0, y0: p.y0, w: p.w, h: p.h, colors: p.colors || [p.color], mask: IP.rleDecode(p.rle, p.w * p.h) };
+}
+
+H_.applyOp = ({ opId, rids, parts }) => {
+  let ps;
+  if (rids) ps = rids.map((k) => E.found.get(k)).filter(Boolean);
+  else ps = parts.map(partFromData);
+  if (!ps.length) throw new Error('Nothing to remove.');
+  const patches = ps.map((part) => IP.unpaint(E.raster, E.W, part, E.paper).patch);
+  E.ops.set(opId, { parts: ps, patches, applied: true });
+  const b = opBBox(ps);
+  afterRasterChange(b);
+  return { bbox: b };
+};
+
+H_.revertOp = ({ opId }) => {
+  const op = E.ops.get(opId);
+  if (!op || !op.applied || !op.patches) return false;
+  for (let k = op.parts.length - 1; k >= 0; k--) IP.restorePatch(E.raster, E.W, op.parts[k], op.patches[k]);
+  op.applied = false;
+  afterRasterChange(opBBox(op.parts));
+  return true;
+};
+
+H_.reapplyOp = ({ opId }) => {
+  const op = E.ops.get(opId);
+  if (!op || op.applied) return false;
+  op.patches = op.parts.map((part) => IP.unpaint(E.raster, E.W, part, E.paper).patch);
+  op.applied = true;
+  afterRasterChange(opBBox(op.parts));
+  return true;
+};
+
+H_.forgetPatches = ({ ids }) => { for (const k of ids) { const op = E.ops.get(k); if (op && op.applied) op.patches = null; } return true; };
+H_.disposeOps = ({ ids }) => { for (const k of ids) E.ops.delete(k); return true; };
+
+H_.opData = ({ ids }) => {
+  const out = {};
+  const transfer = [];
+  for (const k of ids) {
+    const op = E.ops.get(k);
+    if (!op) continue;
+    out[k] = op.parts.map((p) => { const rle = IP.rleEncode(p.mask); transfer.push(rle.buffer); return { x0: p.x0, y0: p.y0, w: p.w, h: p.h, colors: p.colors, rle }; });
+  }
+  return { result: out, transfer };
+};
+
+/** Eraser on the drawing: removes painted colour under a brush stroke. */
+H_.eraseColour = ({ opId, pts, radius }) => {
+  if (!E.raster) return { changed: 0 };
+  const sm = IP.strokeMask(pts, radius, E.W, E.H);
+  if (!sm) return { changed: 0 };
+  const colors = IP.estimatePaints(E.raster, E.W, sm.x0, sm.y0, sm.w, sm.h, sm.mask, E.paper);
+  if (!colors.length) return { changed: 0, reason: 'no-colour' };
+  const part = { x0: sm.x0, y0: sm.y0, w: sm.w, h: sm.h, mask: sm.mask, colors };
+  const { patch, changed } = IP.unpaint(E.raster, E.W, part, E.paper);
+  if (!changed) return { changed: 0, reason: 'no-colour' };
+  E.ops.set(opId, { parts: [part], patches: [patch], applied: true });
+  const b = opBBox([part]);
+  afterRasterChange(b);
+  return { changed, bbox: b, colors };
+};
+
+/** Eraser Shift+click on the drawing: removes the whole painted area under the click. */
+H_.eraseColourAt = ({ opId, x, y }, id) => {
+  if (!E.raster) return { changed: 0 };
+  const c = colourAt(E.raster, E.W, E.H, x, y, E.paper);
+  if (!c) return { changed: 0, reason: 'no-colour' };
+  const prog = progressFor(id);
+  const cell = Math.max(2, Math.round(E.dpi / 110));
+  const res = detectPaint(E.raster, E.W, E.H, {
+    paper: E.paper, target: c, targetTol: 26, cell,
+    minAreaPx: Math.max(150, Math.round(((3 / 25.4) * E.dpi) ** 2)),
+    progress: (f) => prog(f, 'Finding the coloured area'),
+  });
+  let best = null, bd = Infinity;
+  const ix = Math.floor(x), iy = Math.floor(y);
+  for (const g of res.groups) for (const r of g.regions) {
+    const p = r.part;
+    const lx = ix - p.x0, ly = iy - p.y0;
+    if (lx >= 0 && ly >= 0 && lx < p.w && ly < p.h && p.mask[ly * p.w + lx]) { best = r; bd = 0; break; }
+    const dx = Math.max(p.x0 - x, 0, x - (p.x0 + p.w)), dy = Math.max(p.y0 - y, 0, y - (p.y0 + p.h));
+    const d = Math.hypot(dx, dy);
+    if (d < bd) { bd = d; best = r; }
+  }
+  if (!best || bd > Math.max(8, E.dpi / 25.4)) return { changed: 0, reason: 'no-area' };
+  const part = best.part;
+  const { patch, changed } = IP.unpaint(E.raster, E.W, part, E.paper);
+  if (!changed) return { changed: 0, reason: 'no-area' };
+  E.ops.set(opId, { parts: [part], patches: [patch], applied: true });
+  const b = opBBox([part]);
+  afterRasterChange(b);
+  return { changed, bbox: b, color: c };
+};
+
+// ------------------------------------------------------------------ export: shared drawing
+
+function ringsPath(rings) {
+  const p = new Path2D();
+  for (const r of rings) {
+    p.moveTo(r[0], r[1]);
+    for (let i = 2; i < r.length; i += 2) p.lineTo(r[i], r[i + 1]);
+    p.closePath();
+  }
+  return p;
+}
+const css = (c, a = 1) => `rgba(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])},${a})`;
+const dashMin = () => (1.2 * E.dpi) / 72;
+
+function drawMarkupReplace(o, m) {
+  const p = ringsPath(m.rings);
+  o.globalCompositeOperation = 'destination-out';
+  o.fillStyle = '#000';
+  o.fill(p, 'evenodd');
+  o.globalCompositeOperation = 'source-over';
+  o.fillStyle = css(m.color, m.opacity);
+  o.fill(p, 'evenodd');
+  if (m.borderPx > 0) {
+    const ls = dashFor(m.borderStyle, m.borderPx, dashMin());
+    o.lineJoin = 'miter'; o.miterLimit = 4; o.lineCap = ls.cap; o.setLineDash(ls.dash); o.lineWidth = m.borderPx;
+    o.globalCompositeOperation = 'destination-out'; o.strokeStyle = '#000'; o.stroke(p);
+    o.globalCompositeOperation = 'source-over'; o.strokeStyle = css(m.borderColor, 1); o.stroke(p);
+    o.setLineDash([]);
+  }
+}
+
+/** Draws rows y0..y0+bh of the finished sheet (drawing, highlights, legend) into ctx at (0,0). */
+function composeBand(ctx, y0, bh, markups, legend, overlay) {
+  const { W } = E;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.putImageData(new ImageData(E.raster.slice(y0 * W * 4, (y0 + bh) * W * 4), W, bh), 0, 0);
+  if (markups.length) {
+    const o = overlay.getContext('2d');
+    o.setTransform(1, 0, 0, 1, 0, 0);
+    o.globalCompositeOperation = 'source-over';
+    o.clearRect(0, 0, overlay.width, overlay.height);
+    o.setTransform(1, 0, 0, 1, 0, -y0);
+    let any = false;
+    for (const m of markups) {
+      const pad = m.borderPx + 2;
+      if (m.bbox[3] + pad < y0 || m.bbox[1] - pad > y0 + bh) continue;
+      drawMarkupReplace(o, m);
+      any = true;
+    }
+    if (any) {
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.drawImage(overlay, 0, 0, W, bh, 0, 0, W, bh);
+      ctx.globalCompositeOperation = 'source-over';
+    }
+  }
+  if (legend && legend.bitmap && legend.y < y0 + bh && legend.y + legend.h > y0) {
+    ctx.drawImage(legend.bitmap, legend.x, legend.y - y0, legend.w, legend.h);
+  }
+}
+
+async function legendBitmapOf(legend) {
+  if (!legend || !legend.png) return null;
+  const bitmap = await createImageBitmap(new Blob([legend.png], { type: 'image/png' }));
+  return { ...legend, bitmap };
+}
+
+let crcTable = null;
+function crc32(bytes, start, end) {
+  if (!crcTable) {
+    crcTable = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; crcTable[n] = c >>> 0; }
+  }
+  let c = 0xffffffff;
+  for (let i = start; i < end; i++) c = crcTable[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+/** Adds print resolution so the picture prints at the drawing's real size. */
+function withDpi(bytes, type, dpi) {
+  if (!dpi) return bytes;
+  if (type === 'png' && bytes[12] === 0x49 && bytes[13] === 0x48) {
+    const ppm = Math.round(dpi / 0.0254);
+    const chunk = new Uint8Array(21);
+    const dv = new DataView(chunk.buffer);
+    dv.setUint32(0, 9); chunk.set([0x70, 0x48, 0x59, 0x73], 4);
+    dv.setUint32(8, ppm); dv.setUint32(12, ppm); chunk[16] = 1;
+    dv.setUint32(17, crc32(chunk, 4, 17));
+    const out = new Uint8Array(bytes.length + 21);
+    out.set(bytes.subarray(0, 33), 0); out.set(chunk, 33); out.set(bytes.subarray(33), 54);
+    return out;
+  }
+  if (type === 'jpg' && bytes[2] === 0xff && bytes[3] === 0xe0 && bytes[6] === 0x4a) {
+    bytes[13] = 1; bytes[14] = (dpi >> 8) & 0xff; bytes[15] = dpi & 0xff; bytes[16] = (dpi >> 8) & 0xff; bytes[17] = dpi & 0xff;
+  }
+  return bytes;
+}
+
+H_.exportImage = async ({ type, quality, markups, legend }, id) => {
+  const prog = progressFor(id);
+  const { W, H } = E;
+  prog(0.05, 'Composing the sheet');
+  const lg = await legendBitmapOf(legend);
+  const cv = new OffscreenCanvas(W, H);
+  const ctx = cv.getContext('2d');
+  const BH = Math.min(H, 2048);
+  const overlay = new OffscreenCanvas(W, BH);
+  const band = new OffscreenCanvas(W, BH);
+  const bctx = band.getContext('2d');
+  for (let y0 = 0; y0 < H; y0 += BH) {
+    const bh = Math.min(BH, H - y0);
+    composeBand(bctx, y0, bh, markups, lg, overlay);
+    ctx.drawImage(band, 0, 0, W, bh, 0, y0, W, bh);
+    prog(0.05 + 0.5 * ((y0 + bh) / H), 'Composing the sheet');
+  }
+  if (lg) lg.bitmap.close();
+  prog(0.6, type === 'png' ? 'Compressing the PNG' : 'Compressing the JPEG');
+  const blob = await cv.convertToBlob(type === 'jpg' ? { type: 'image/jpeg', quality: quality || 0.92 } : { type: 'image/png' });
+  const bytes = withDpi(new Uint8Array(await blob.arrayBuffer()), type, E.dpi);
+  prog(1, 'Done');
+  return { result: bytes, transfer: [bytes.buffer] };
+};
+
+// ------------------------------------------------------------------ export: PDF
+
+const pn = (v) => {
+  if (!Number.isFinite(v)) return '0';
+  const r = Math.round(v * 100) / 100;
+  return r === 0 ? '0' : String(r);
+};
+const pm = (m) => m.map((v) => (Math.abs(v) < 1e-9 ? '0' : String(Math.round(v * 1e6) / 1e6))).join(' ');
+
+function pathOps(rings, out) {
+  for (const r of rings) {
+    out.push(pn(r[0]) + ' ' + pn(r[1]) + ' m');
+    for (let i = 2; i < r.length; i += 2) out.push(pn(r[i]) + ' ' + pn(r[i + 1]) + ' l');
+    out.push('h');
+  }
+}
+
+/** Net number of unclosed q operators in content streams (so our content starts clean). */
+function unbalancedSaves(chunks) {
+  let depth = 0;
+  const isWS = (c) => c === 32 || c === 10 || c === 13 || c === 9 || c === 12 || c === 0;
+  const isDelim = (c) => c === 40 || c === 41 || c === 60 || c === 62 || c === 91 || c === 93 || c === 123 || c === 125 || c === 47 || c === 37;
+  for (const bytes of chunks) {
+    const n = bytes.length;
+    let i = 0;
+    while (i < n) {
+      const c = bytes[i];
+      if (isWS(c)) { i++; continue; }
+      if (c === 37) { while (i < n && bytes[i] !== 10 && bytes[i] !== 13) i++; continue; }
+      if (c === 40) {
+        let d = 1; i++;
+        while (i < n && d > 0) { const b = bytes[i]; if (b === 92) { i += 2; continue; } if (b === 40) d++; else if (b === 41) d--; i++; }
+        continue;
+      }
+      if (c === 60) { if (bytes[i + 1] === 60) { i += 2; continue; } while (i < n && bytes[i] !== 62) i++; i++; continue; }
+      if (c === 62 || c === 91 || c === 93 || c === 123 || c === 125 || c === 41) { i++; continue; }
+      if (c === 47) { i++; while (i < n && !isWS(bytes[i]) && !isDelim(bytes[i])) i++; continue; }
+      const s = i;
+      while (i < n && !isWS(bytes[i]) && !isDelim(bytes[i])) i++;
+      const len = i - s;
+      if (len === 1) { if (bytes[s] === 113) depth++; else if (bytes[s] === 81 && depth > 0) depth--; }
+      else if (len === 2 && bytes[s] === 73 && bytes[s + 1] === 68) {
+        // inline image data: skip to EI
+        i++;
+        while (i < n - 1) {
+          if (bytes[i] === 69 && bytes[i + 1] === 73 && isWS(bytes[i - 1]) && (i + 2 >= n || isWS(bytes[i + 2]))) { i += 2; break; }
+          i++;
+        }
+      }
+    }
+  }
+  return depth;
+}
+
+/** RGB bytes of a rectangle of an RGBA buffer. */
+function rgbBytes(rgba, W, x0, y0, w, h) {
+  const out = new Uint8Array(w * h * 3);
+  for (let y = 0; y < h; y++) {
+    let s = ((y0 + y) * W + x0) * 4, d = y * w * 3;
+    for (let x = 0; x < w; x++, s += 4, d += 3) { out[d] = rgba[s]; out[d + 1] = rgba[s + 1]; out[d + 2] = rgba[s + 2]; }
+  }
+  return out;
+}
+
+/**
+ * Writes an image XObject in the plainest form every reader accepts: 8-bit DeviceRGB, Flate,
+ * and (optionally) an 8-bit DeviceGray soft mask. (A soft mask in any other colour space is
+ * invalid and some readers, Poppler for one, then drop the picture.)
+ */
+function addPlainImage(out, rgb, w, h, alpha) {
+  const dict = { Type: 'XObject', Subtype: 'Image', Width: w, Height: h, ColorSpace: 'DeviceRGB', BitsPerComponent: 8, Filter: 'FlateDecode' };
+  if (alpha) {
+    dict.SMask = out.addRawStream(zlibSync(alpha, { level: 6 }), { Type: 'XObject', Subtype: 'Image', Width: w, Height: h, ColorSpace: 'DeviceGray', BitsPerComponent: 8, Filter: 'FlateDecode' });
+  }
+  return out.addRawStream(zlibSync(rgb, { level: 6 }), dict);
+}
+
+/** The legend picture flattened onto white (it is an opaque table) as RGB bytes. */
+async function legendRgb(lg) {
+  const bmp = await createImageBitmap(new Blob([lg.png], { type: 'image/png' }));
+  const w = bmp.width, h = bmp.height;
+  const c = new OffscreenCanvas(w, h);
+  const x = c.getContext('2d');
+  x.fillStyle = '#FFFFFF';
+  x.fillRect(0, 0, w, h);
+  x.drawImage(bmp, 0, 0);
+  bmp.close();
+  return { rgb: rgbBytes(x.getImageData(0, 0, w, h).data, w, 0, 0, w, h), w, h };
+}
+
+/**
+ * PDF export. Highlights are written as plain filled paths in the page's own content, with an
+ * ExtGState (Multiply blend + opacity) in the page's own resources: the simplest form, which
+ * every PDF reader and printer shows. For a PDF drawing the original page is kept as it is
+ * (vector, text, layers); colour taken out of the drawing is covered with picture patches.
+ * mode 'flat' writes one picture of the finished sheet instead (same look in every program).
+ */
+H_.exportPdf = async ({ mode, markups, legend, title }, id) => {
+  const mupdf = await MU();
+  const prog = progressFor(id);
+  const { W, H } = E;
+  const k = 72 / E.dpi;
+  const pw = W * k, ph = H * k;
+  const out = new mupdf.PDFDocument();
+  const lg = legend && legend.png ? legend : null;
+  prog(0.03, 'Writing the PDF');
+
+  // ---- base page and the matrix from sheet pixels to PDF user space
+  let page, M;
+  const src = mode !== 'flat' && E.pdf ? E.pdf.asPDF && E.pdf.asPDF() : null;
+  const res = out.newDictionary();
+  const xobj = out.newDictionary();
+  const gstates = out.newDictionary();
+  let nX = 0; // entries in xobj (PDFObject.length only counts arrays)
+  let baseContent = '';
+  const applied = [...E.ops.values()].filter((op) => op.applied);
+  if (src) {
+    // one graft map, so the page's layers and the document's layer settings stay linked
+    const map = out.newGraftMap();
+    map.graftPage(-1, src, E.pageIndex);
+    try {
+      // keep layers (and which ones are switched off) exactly as in the original drawing
+      const ocp = src.getTrailer().get('Root').get('OCProperties');
+      if (ocp && !ocp.isNull()) out.getTrailer().get('Root').put('OCProperties', map.graftObject(ocp));
+    } catch { /* no layers */ }
+    page = out.findPage(0);
+    const pg = out.loadPage(0);
+    const ctm = pg.getTransform();
+    pg.destroy();
+    const s = E.pageScale;
+    M = mupdf.Matrix.concat([1 / s, 0, 0, 1 / s, E.ib[0] / s, E.ib[1] / s], mupdf.Matrix.invert(ctm));
+  } else {
+    M = [k, 0, 0, -k, 0, ph];
+    prog(0.1, 'Writing the PDF');
+    let rgb;
+    if (mode === 'flat') {
+      // the finished sheet as one picture
+      const lgb = await legendBitmapOf(lg);
+      rgb = new Uint8Array(W * H * 3);
+      const BH = Math.min(H, 1024);
+      const band = new OffscreenCanvas(W, BH);
+      const bctx = band.getContext('2d', { willReadFrequently: true });
+      const overlay = new OffscreenCanvas(W, BH);
+      for (let y0 = 0; y0 < H; y0 += BH) {
+        const bh = Math.min(BH, H - y0);
+        composeBand(bctx, y0, bh, markups, lgb, overlay);
+        const data = bctx.getImageData(0, 0, W, bh).data;
+        rgb.set(rgbBytes(data, W, 0, 0, W, bh), y0 * W * 3);
+        prog(0.1 + 0.5 * ((y0 + bh) / H), 'Writing the PDF');
+      }
+      if (lgb) lgb.bitmap.close();
+    } else {
+      rgb = rgbBytes(E.raster, W, 0, 0, W, H);
+    }
+    prog(0.62, 'Compressing the picture');
+    if (E.srcExt === 'jpg' || E.srcExt === 'jpeg') {
+      // a photo or scan stays a JPEG
+      const pix = new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB, [0, 0, W, H], false);
+      const px = pix.getPixels();
+      const stride = pix.getStride();
+      for (let y = 0; y < H; y++) px.set(rgb.subarray(y * W * 3, (y + 1) * W * 3), y * stride);
+      const img = new mupdf.Image(pix.asJPEG(92));
+      xobj.put('PlanTintBase', out.addImage(img)); nX++;
+      img.destroy(); pix.destroy();
+    } else {
+      xobj.put('PlanTintBase', addPlainImage(out, rgb, W, H, null)); nX++;
+    }
+    rgb = null;
+    baseContent = `q ${pn(pw)} 0 0 ${pn(ph)} 0 0 cm /PlanTintBase Do Q\n`;
+  }
+  prog(0.72, 'Adding highlights');
+
+  // ---- overlay content, in sheet pixels
+  const ops = [];
+  ops.push('q', pm(M) + ' cm');
+  // patches: colour taken out of a vector drawing, as pictures of the cleaned sheet
+  let n = 0;
+  if (src && applied.length) {
+    for (const op of applied) {
+      for (const part of op.parts) {
+        const alpha = new Uint8Array(part.w * part.h);
+        for (let i = 0; i < alpha.length; i++) alpha[i] = part.mask[i] ? 255 : 0;
+        const name = 'PlanTintP' + n++;
+        xobj.put(name, addPlainImage(out, rgbBytes(E.raster, W, part.x0, part.y0, part.w, part.h), part.w, part.h, alpha)); nX++;
+        ops.push(`q ${pn(part.w)} 0 0 ${pn(-part.h)} ${pn(part.x0)} ${pn(part.y0 + part.h)} cm /${name} Do Q`);
+      }
+    }
+  }
+  // highlights, bottom to top
+  const gsNames = new Map();
+  const gsFor = (opacity) => {
+    const key = Math.round(opacity * 1000) / 1000;
+    if (gsNames.has(key)) return gsNames.get(key);
+    const name = 'PlanTintM' + gsNames.size;
+    const d = out.newDictionary();
+    d.put('Type', out.newName('ExtGState'));
+    d.put('BM', out.newName('Multiply'));
+    d.put('ca', key);
+    d.put('CA', 1);
+    gstates.put(name, out.addObject(d));
+    gsNames.set(key, name);
+    return name;
+  };
+  const rgbOp = (c) => c.map((v) => pn(Math.max(0, Math.min(255, v)) / 255)).join(' ');
+  const live = mode === 'flat' ? [] : markups; // flat: highlights and legend are in the picture already
+  for (const m of live) {
+    ops.push('q');
+    if (m.hide && m.hide.length) {
+      // never stack: hide this highlight where the ones above it are
+      const pad = 20;
+      ops.push(`${pn(-pad)} ${pn(-pad)} m ${pn(W + pad)} ${pn(-pad)} l ${pn(W + pad)} ${pn(H + pad)} l ${pn(-pad)} ${pn(H + pad)} l h`);
+      pathOps(m.hide, ops);
+      ops.push('W* n');
+    }
+    ops.push('/' + gsFor(m.opacity) + ' gs');
+    ops.push(rgbOp(m.color) + ' rg');
+    pathOps(m.rings, ops);
+    ops.push('f*');
+    if (m.borderPx > 0) {
+      const ls = dashFor(m.borderStyle, m.borderPx, dashMin());
+      ops.push(rgbOp(m.borderColor) + ' RG');
+      ops.push(pn(m.borderPx) + ' w 0 j 4 M ' + (ls.cap === 'round' ? 1 : 0) + ' J');
+      ops.push('[' + ls.dash.map(pn).join(' ') + '] 0 d');
+      pathOps(m.rings, ops);
+      ops.push('S');
+    }
+    ops.push('Q');
+  }
+  // legend
+  if (lg && mode !== 'flat') {
+    const L = await legendRgb(lg);
+    xobj.put('PlanTintLegend', addPlainImage(out, L.rgb, L.w, L.h, null)); nX++;
+    ops.push(`q ${pn(lg.w)} 0 0 ${pn(-lg.h)} ${pn(lg.x)} ${pn(lg.y + lg.h)} cm /PlanTintLegend Do Q`);
+  }
+  ops.push('Q');
+  const overlay = ops.join('\n') + '\n';
+  prog(0.85, 'Writing the PDF');
+
+  if (src) {
+    // add our resources next to the page's own ones (never replacing them)
+    let pres = page.get('Resources');
+    if (pres.isNull()) {
+      const inh = page.getInheritable('Resources');
+      pres = inh.isNull() ? out.newDictionary() : inh;
+      page.put('Resources', pres);
+    }
+    const merge = (key, dict, count) => {
+      if (!count) return;
+      let d = pres.get(key);
+      if (d.isNull()) { d = out.newDictionary(); pres.put(key, d); }
+      dict.forEach((v, name) => d.put(name, v));
+    };
+    merge('XObject', xobj, nX);
+    merge('ExtGState', gstates, gsNames.size);
+    // wrap the original content in q/Q so our content starts from a clean graphics state
+    const contents = page.get('Contents');
+    const streams = [];
+    if (contents.isArray()) for (let i = 0; i < contents.length; i++) streams.push(contents.get(i));
+    else if (!contents.isNull()) streams.push(contents);
+    const chunks = [];
+    for (const s of streams) { try { chunks.push(s.readStream().asUint8Array()); } catch { /* unreadable stream */ } }
+    const open = unbalancedSaves(chunks);
+    const arr = out.newArray();
+    arr.push(out.addStream('q\n', {}));
+    for (const s of streams) arr.push(s);
+    arr.push(out.addStream('Q\n'.repeat(1 + open) + overlay, {}));
+    page.put('Contents', arr);
+  } else {
+    if (nX) res.put('XObject', xobj);
+    if (gsNames.size) res.put('ExtGState', gstates);
+    const pageObj = out.addPage([0, 0, pw, ph], 0, res, baseContent + overlay);
+    out.insertPage(-1, pageObj);
+  }
+  try {
+    if (title) out.setMetaData('info:Title', title);
+    out.setMetaData('info:Creator', 'PlanTint 1.1');
+  } catch { /* metadata is optional */ }
+  prog(0.9, 'Compressing the PDF');
+  const buf = out.saveToBuffer('compress,compress-images,compress-fonts,garbage');
+  const bytes = buf.asUint8Array().slice();
+  buf.destroy();
+  out.destroy();
+  prog(1, 'Done');
+  return { result: bytes, transfer: [bytes.buffer] };
+};
+
+H_.reset = () => { freeRaster(); E.gen++; return true; };
+H_.inkGrid = () => (E.ink ? { result: { ...E.ink, ink: E.ink.ink.slice() }, transfer: [] } : null);
+
+// ------------------------------------------------------------------ dispatch
+
+self.onmessage = async (ev) => {
+  const { id, cmd, args } = ev.data;
+  const fn = H_[cmd];
+  if (!fn) { post({ id, ok: false, error: 'Unknown command ' + cmd }); return; }
+  try {
+    const out = await fn(args || {}, id);
+    if (out && typeof out === 'object' && 'result' in out && 'transfer' in out) post({ id, ok: true, result: out.result }, out.transfer);
+    else post({ id, ok: true, result: out });
+  } catch (e) {
+    post({ id, ok: false, error: (e && e.message) || String(e) });
+  }
+};
+post({ type: 'ready' });

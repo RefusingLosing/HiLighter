@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'">
+<title>PlanTint</title>
+<link rel="stylesheet" href="fonts.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header id="topbar"></header>
+<main id="workspace">
+  <nav id="rail" aria-label="Tools"></nav>
+  <section id="stage">
+    <div id="canvas-wrap">
+      <canvas id="scene"></canvas>
+      <canvas id="ui"></canvas>
+      <canvas id="loupe" aria-hidden="true"></canvas>
+      <div id="empty"></div>
+    </div>
+    <footer id="statusbar">
+      <div id="hint"></div>
+      <div id="tool-options"></div>
+    </footer>
+  </section>
+  <aside id="panel" aria-label="Style, legend and markups"></aside>
+</main>
+<div id="layer"></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

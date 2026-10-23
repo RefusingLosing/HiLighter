@@ -1,0 +1,90 @@
+{
+  "name": "plantint",
+  "productName": "PlanTint",
+  "version": "1.1.0",
+  "description": "PlanTint: fast highlighting for architectural and technical drawings",
+  "author": {
+    "name": "Claude for Abdelrahman"
+  },
+  "license": "AGPL-3.0-or-later",
+  "main": "dist/app/main.js",
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "electron dist/app",
+    "dist": "node build.mjs --minify && electron-builder --win --x64"
+  },
+  "devDependencies": {
+    "@fontsource/ibm-plex-sans": "^5.3.0",
+    "@fontsource/ibm-plex-sans-arabic": "^5.3.0",
+    "clipper-lib": "^6.4.2",
+    "electron": "^44.9.3",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
+    "fflate": "^0.8.3",
+    "lucide-static": "^1.61.0",
+    "mupdf": "^1.28.1",
+    "playwright-core": "^1.64.1",
+    "resedit": "^3.1.0",
+    "utif": "^3.1.0"
+  },
+  "build": {
+    "appId": "com.plantint.desktop",
+    "productName": "PlanTint",
+    "copyright": "PlanTint 2026",
+    "directories": {
+      "output": "release",
+      "buildResources": "assets"
+    },
+    "files": [
+      "dist/app/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "compression": "normal",
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "legalTrademarks": "PlanTint",
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "PlanTint",
+      "artifactName": "PlanTint-Setup-${version}.exe",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "PlanTint-${version}-portable.exe"
+    },
+    "fileAssociations": [
+      {
+        "ext": "plantint",
+        "name": "PlanTint project",
+        "description": "PlanTint project",
+        "icon": "assets/project.ico",
+        "role": "Editor"
+      }
+    ],
+    "publish": null
+  }
+}

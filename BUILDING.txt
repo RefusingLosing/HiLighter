@@ -1,0 +1,46 @@
+Building PlanTint from source
+
+REQUIREMENTS
+  Node.js 22 or newer and npm. Building the Windows installer on Windows needs nothing
+  else; building it on Linux also needs Wine (32- and 64-bit) for the installer step.
+
+BUILD
+  npm install
+  npm run build      bundles the app into dist/app
+  npm start          runs it (Electron)
+  npm run dist       makes release/PlanTint-Setup-<version>.exe and the portable .exe
+
+LAYOUT
+  src/main/          Electron main process: window, file dialogs, file writing, the
+                     close/save handshake and crash-recovery copies (main.js, preload.js)
+  src/renderer/      the interface: tools (tools.js), drawing of the sheet and markups
+                     (render.js), side panel (panel.js), dialogs and the painted-colour
+                     finder panel (dialogs.js), open/save/export (io.js), undo (history.js)
+  src/engine/        a Web Worker that owns the drawing's pixels: renders PDFs with MuPDF,
+                     decodes pictures, fill, painted-colour search (detect.js), colour
+                     removal (imgproc.js unpaint), and every export (PNG, JPEG, PDF)
+  src/shared/        code used by both: border line styles (linestyle.js)
+  assets/            icons (tools/make_icons.py draws them)
+  build.mjs          esbuild bundling, icon set, fonts, MuPDF files
+
+TESTS
+  test/run_all.sh runs everything on Linux. It needs xvfb, python3 with numpy, scipy,
+  pillow, pypdfium2, pikepdf and reportlab, plus poppler-utils, ghostscript and qpdf.
+  The first run draws the test drawings into testdata/out (testdata/*.py).
+    test/harness/    runs the engine in Node to write PDFs without the interface
+    test/pdfcheck/   renders PDFs with MuPDF, PDFium, Poppler and Ghostscript and compares
+                     them with the expected result (check_app.py compares the app's own PDF
+                     exports with its PNG export; check_layers.py checks layer settings)
+    test/e2e/        drives the built app with Playwright: t0 is the 1.0 behaviour, t1 to
+                     t5 are the five 1.1 fixes (PDF export, rectangle guides, line styles,
+                     painted colour, eraser)
+  Set PLANTINT_TEST_OUT to choose where results go (default: the system temp folder).
+
+FILE FORMAT
+  A .plantint project is a zip: project.json (markups, legend, style, scale and the
+  colour-removal steps), the original drawing under source/, and one run-length mask per
+  colour-removal step under ops/. Version 2 adds border line styles, the drawing scale
+  and several paint colours per removal step; version 1 files open unchanged.
+
+LICENCE
+  AGPL-3.0-or-later (because of MuPDF). See the licences in README.txt.
