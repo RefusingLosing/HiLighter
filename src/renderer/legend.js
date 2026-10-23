@@ -4,6 +4,8 @@
 import { S, ptToPx } from './state.js';
 import { tintOnPaper, borderColorOf } from './colors.js';
 import { dashFor } from '../shared/linestyle.js';
+import { measureAt } from './measure.js';
+import { hasScale, areaNumber, fmtNum, areaDecimals, areaUnitLabel, lengthUnit, lengthUnitLabel, realPerPx, lengthUnitInfo, fmtFtIn, lengthDecimals } from './units.js';
 
 export const LEGEND_FONT = '"IBM Plex Sans", "IBM Plex Sans Arabic", "Segoe UI", Arial, sans-serif';
 
@@ -87,20 +89,47 @@ export function bestLegendSpot(L) {
   return [Math.round((best.cx + 1) * cell), Math.round((best.cy + 1) * cell)];
 }
 
+/** Which measured columns the legend shows: { area, perim } (needs a scale). */
+export function legendCols() {
+  const on = !!(S.meas.legend && hasScale());
+  return { area: on && S.meas.showArea, perim: on && S.meas.showPerim };
+}
+
 export function legendRows(L = S.legend) {
-  const rows = S.markups.map((m) => ({
-    name: (m.name || '').trim() || 'Untitled', color: m.color, opacity: m.opacity, borderPt: m.borderPt,
-    borderColor: borderColorOf(m), borderStyle: m.borderStyle || 'solid',
-  }));
+  const cols = legendCols();
+  const want = cols.area || cols.perim;
+  const rows = S.markups.map((m, i) => {
+    const r = want ? measureAt(i) : null;
+    return {
+      name: (m.name || '').trim() || 'Untitled', color: m.color, opacity: m.opacity, borderPt: m.borderPt,
+      borderColor: borderColorOf(m), borderStyle: m.borderStyle || 'solid',
+      area: r ? r.area : 0, perim: r ? r.perim : 0,
+    };
+  });
   if (!L || !L.merge) return rows;
-  const seen = new Set();
+  const seen = new Map();
   const out = [];
   for (const r of rows) {
     const k = r.name.toLowerCase() + '|' + r.color + '|' + r.opacity + '|' + r.borderPt + '|' + r.borderStyle;
-    if (!seen.has(k)) { seen.add(k); out.push(r); }
+    const prev = seen.get(k);
+    if (prev) { prev.area += r.area; prev.perim += r.perim; continue; }
+    const c = { ...r };
+    seen.set(k, c);
+    out.push(c);
   }
   return out;
 }
+
+/** Text of the measured cells and their column titles. */
+function areaCell(px2) { return fmtNum(areaNumber(px2), areaDecimals()); }
+function perimCell(px) {
+  const u = lengthUnit();
+  const m = px * realPerPx();
+  if (u === 'ftin') return fmtFtIn(m / 0.3048, lengthDecimals());
+  return fmtNum(m / lengthUnitInfo(u).m, lengthDecimals());
+}
+const areaTitle = () => `Area (${areaUnitLabel()})`;
+const perimTitle = () => (lengthUnit() === 'ftin' ? 'Perimeter' : `Perimeter (${lengthUnitLabel()})`);
 
 let measure = null;
 function mctx() {
@@ -112,21 +141,36 @@ export function legendLayout(L = S.legend, rows = legendRows(L)) {
   const n = L.namePx, t = L.titlePx;
   const pad = Math.round(n * 0.62);
   const line = Math.max(1, n / 15);
+  const cols = legendCols();
+  const total = (cols.area || cols.perim) && rows.length > 1;
   const c = mctx();
   c.font = `600 ${t}px ${LEGEND_FONT}`;
   const hName = c.measureText('Name').width;
   const hColour = c.measureText('Colour').width;
+  const hArea = cols.area ? c.measureText(areaTitle()).width : 0;
+  const hPerim = cols.perim ? c.measureText(perimTitle()).width : 0;
   c.font = `500 ${n}px ${LEGEND_FONT}`;
   let maxName = rows.length ? 0 : c.measureText('No markups yet').width;
   for (const r of rows) maxName = Math.max(maxName, c.measureText(r.name).width);
+  let maxA = 0, maxP = 0;
+  if (cols.area || cols.perim) {
+    c.font = `600 ${n}px ${LEGEND_FONT}`;
+    const sum = rows.reduce((s_, r) => ({ a: s_.a + r.area, p: s_.p + r.perim }), { a: 0, p: 0 });
+    for (const r of [...rows, { area: sum.a, perim: sum.p }]) {
+      if (cols.area) maxA = Math.max(maxA, c.measureText(areaCell(r.area)).width);
+      if (cols.perim) maxP = Math.max(maxP, c.measureText(perimCell(r.perim)).width);
+    }
+  }
   const swW = Math.round(n * 2.7), swH = Math.round(n * 1.05);
   const col1 = Math.ceil(Math.max(hName, maxName, n * 5) + pad * 2);
+  const colA = cols.area ? Math.ceil(Math.max(hArea, maxA) + pad * 2) : 0;
+  const colP = cols.perim ? Math.ceil(Math.max(hPerim, maxP) + pad * 2) : 0;
   const col2 = Math.ceil(Math.max(hColour, swW) + pad * 2);
   const headH = Math.round(t * 1.8);
   const rowH = Math.round(n * 1.65);
-  const w = col1 + col2;
-  const h = headH + rowH * Math.max(1, rows.length);
-  return { w, h, pad, line, col1, col2, headH, rowH, swW, swH };
+  const w = col1 + colA + colP + col2;
+  const h = headH + rowH * (Math.max(1, rows.length) + (total ? 1 : 0));
+  return { w, h, pad, line, col1, colA, colP, col2, headH, rowH, swW, swH, cols, total };
 }
 
 export function legendRect(L = S.legend) {
@@ -150,18 +194,33 @@ export function drawLegend(ctx, L, rows = legendRows(L), lay = legendLayout(L, r
   ctx.direction = 'ltr';
   ctx.fillStyle = '#1C201E';
   ctx.font = `600 ${L.titlePx}px ${LEGEND_FONT}`;
-  ctx.fillText('Name', lay.pad, lay.headH / 2 + L.titlePx * 0.04);
-  ctx.fillText('Colour', lay.col1 + lay.pad, lay.headH / 2 + L.titlePx * 0.04);
+  const xA = lay.col1, xP = lay.col1 + lay.colA, xC = lay.col1 + lay.colA + lay.colP;
+  const ty = lay.headH / 2 + L.titlePx * 0.04;
+  ctx.fillText('Name', lay.pad, ty);
+  if (lay.cols.area) { ctx.textAlign = 'right'; ctx.fillText(areaTitle(), xA + lay.colA - lay.pad, ty); ctx.textAlign = 'left'; }
+  if (lay.cols.perim) { ctx.textAlign = 'right'; ctx.fillText(perimTitle(), xP + lay.colP - lay.pad, ty); ctx.textAlign = 'left'; }
+  ctx.fillText('Colour', xC + lay.pad, ty);
   ctx.font = `500 ${L.namePx}px ${LEGEND_FONT}`;
   if (!rows.length) {
     ctx.fillStyle = '#7A817C';
     ctx.fillText('No markups yet', lay.pad, lay.headH + lay.rowH / 2);
   }
+  const numbers = (r, y, bold) => {
+    ctx.save();
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#1C201E';
+    ctx.font = `${bold ? 600 : 500} ${L.namePx}px ${LEGEND_FONT}`;
+    const yy = y + lay.rowH / 2 + L.namePx * 0.04;
+    if (lay.cols.area) ctx.fillText(areaCell(r.area), xA + lay.colA - lay.pad, yy);
+    if (lay.cols.perim) ctx.fillText(perimCell(r.perim), xP + lay.colP - lay.pad, yy);
+    ctx.restore();
+  };
   rows.forEach((r, i) => {
     const y = lay.headH + i * lay.rowH;
     ctx.fillStyle = '#1C201E';
     ctx.fillText(r.name, lay.pad, y + lay.rowH / 2 + L.namePx * 0.04);
-    const sx = lay.col1 + lay.pad, sy = y + (lay.rowH - lay.swH) / 2;
+    numbers(r, y, false);
+    const sx = xC + lay.pad, sy = y + (lay.rowH - lay.swH) / 2;
     ctx.fillStyle = tintOnPaper(r.color, r.opacity);
     ctx.fillRect(sx, sy, lay.swW, lay.swH);
     if (r.borderPt > 0) {
@@ -182,6 +241,15 @@ export function drawLegend(ctx, L, rows = legendRows(L), lay = legendLayout(L, r
       ctx.strokeRect(sx + bw / 2, sy + bw / 2, lay.swW - bw, lay.swH - bw);
     }
   });
+  if (lay.total) {
+    const y = lay.headH + rows.length * lay.rowH;
+    ctx.fillStyle = '#F4F5F2';
+    ctx.fillRect(0, y, lay.w, lay.rowH);
+    ctx.fillStyle = '#1C201E';
+    ctx.font = `600 ${L.namePx}px ${LEGEND_FONT}`;
+    ctx.fillText('Total', lay.pad, y + lay.rowH / 2 + L.namePx * 0.04);
+    numbers(rows.reduce((s_, r) => ({ area: s_.area + r.area, perim: s_.perim + r.perim }), { area: 0, perim: 0 }), y, true);
+  }
   ctx.strokeStyle = '#B4BAB5';
   ctx.lineWidth = lay.line * 0.8;
   ctx.beginPath();
@@ -190,8 +258,16 @@ export function drawLegend(ctx, L, rows = legendRows(L), lay = legendLayout(L, r
     const y = lay.headH + i * lay.rowH;
     ctx.moveTo(0, y); ctx.lineTo(lay.w, y);
   }
-  ctx.moveTo(lay.col1, 0); ctx.lineTo(lay.col1, lay.h);
+  for (const x of new Set([lay.col1, lay.col1 + lay.colA, lay.col1 + lay.colA + lay.colP])) { ctx.moveTo(x, 0); ctx.lineTo(x, lay.h); }
   ctx.stroke();
+  if (lay.total) {
+    ctx.strokeStyle = '#2B302D';
+    ctx.lineWidth = lay.line * 1.1;
+    ctx.beginPath();
+    const y = lay.headH + rows.length * lay.rowH;
+    ctx.moveTo(0, y); ctx.lineTo(lay.w, y);
+    ctx.stroke();
+  }
   ctx.strokeStyle = '#2B302D';
   ctx.lineWidth = lay.line * 1.1;
   ctx.beginPath();

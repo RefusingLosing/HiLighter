@@ -2,8 +2,13 @@
 // selection or the next markup, the legend controls, and the markup list (the only part of
 // the panel that scrolls).
 
-import { S, on, emit, withProps, selectedMarkups, setSelection, pxToPt } from './state.js';
-import { h, icon, toast } from './ui.js';
+import { S, on, emit, withProps, selectedMarkups, setSelection, pxToPt, setMeas } from './state.js';
+import { h, icon, toast, showMenu } from './ui.js';
+import { measureAt, totals } from './measure.js';
+import {
+  LENGTH_UNITS, AREA_UNITS, hasScale, areaLabel, lengthLabel, fmtScale, scaleSource, lengthUnitLabel,
+} from './units.js';
+import { resetScale } from './scale.js';
 import { PALETTE, normalizeHex, tintOnPaper, borderColorOf, autoBorder } from './colors.js';
 import { change, commit, snapshot } from './history.js';
 import { legendLimits, clampLegendSizes, bestLegendSpot } from './legend.js';
@@ -161,12 +166,14 @@ export function initPanel(root, acts) {
   const listHead = h('div', { class: 'list-head' },
     h('span', { class: 'sec-title' }, 'Markups'), h('span', { class: 'count', id: 'list-count' }, '0'),
     h('span', { class: 'flex' }),
+    h('span', { class: 'list-total', id: 'list-total', 'data-tip': 'Total of all markups (visible parts)', 'data-tip-side': 'top' }),
     h('button', { class: 'tool-mini', 'data-tip': 'Select all', 'data-key': 'Ctrl+A', onclick: () => setSelection(S.markups.map((m) => m.id)), html: icon('layers', 16) }));
   const list = h('div', { class: 'mk-list', id: 'mk-list', role: 'listbox', 'aria-multiselectable': 'true', tabindex: '0' });
   const empty = h('div', { class: 'mk-empty', id: 'mk-empty' }, 'Fill an area or draw a polygon. Each markup appears here with its name.');
   const listSec = h('section', { class: 'list-sec' }, listHead, h('div', { class: 'mk-scroll' }, list, empty));
 
-  root.append(card, legSec, listSec);
+  const measSec = buildMeasure();
+  root.append(card, legSec, measSec, listSec);
   els = { opRange, opVal, bdRange, bdVal, hexInput, pal, list, empty, legSwitch, legBody, legSec, styleSegs };
 
   list.addEventListener('keydown', (e) => {
@@ -175,9 +182,148 @@ export function initPanel(root, acts) {
   });
 
   on('selection', () => { refreshStyle(); refreshList(); });
-  on('doc', () => { refreshStyle(); refreshList(); refreshLegend(); });
+  on('doc', () => { refreshStyle(); refreshList(); refreshLegend(); refreshMeasure(); });
+  on('scale', () => { refreshStyle(); refreshList(); refreshMeasure(); });
+  on('docLoaded', refreshMeasure);
   on('style', refreshStyle);
-  refreshStyle(); refreshList(); refreshLegend();
+  refreshStyle(); refreshList(); refreshLegend(); refreshMeasure();
+}
+
+// ------------------------------------------------------------------ measurements
+
+const DECIMALS = [['auto', 'Auto'], [0, '0'], [1, '0.0'], [2, '0.00'], [3, '0.000']];
+const FTIN_STEPS = [['auto', 'Auto'], [0, '1"'], [1, '1/2"'], [2, '1/4"'], [3, '1/8"'], [4, '1/16"']];
+// open unless closed before; on short screens it starts closed so the markup list keeps its room
+let measOpen = window.innerHeight >= 860;
+try { const v = localStorage.getItem('plantint.measOpen'); if (v !== null) measOpen = v !== '0'; } catch { /* storage is optional */ }
+let mEls = {};
+
+function setMeasUndoable(label, props) {
+  if (!S.doc) { setMeas(props); refreshMeasure(); return; }
+  const keys = Object.keys(props);
+  if (keys.every((k) => S.meas[k] === props[k])) return;
+  change(label, () => setMeas(props));
+  actions.requestUI();
+}
+
+function buildMeasure() {
+  const chev = h('span', { class: 'ms-chev', html: icon('chevron-right', 15) });
+  const sum = h('span', { class: 'ms-sum', id: 'ms-sum' });
+  const head = h('button', { class: 'sec-head ms-head', id: 'ms-head', 'aria-expanded': String(measOpen), onclick: () => {
+    measOpen = !measOpen;
+    try { localStorage.setItem('plantint.measOpen', measOpen ? '1' : '0'); } catch { /* ignore */ }
+    refreshMeasure();
+  } }, chev, h('span', { class: 'sec-title' }, 'Measurements'), sum);
+
+  const scaleTxt = h('span', { class: 'ms-scale', id: 'ms-scale' });
+  const calBtn = h('button', { class: 'btn small', id: 'ms-cal', 'data-tip': 'Click both ends of a length you know, then type it', 'data-key': 'C', 'data-tip-side': 'top', onclick: () => actions.setTool('calib') }, 'Calibrate');
+  const resetBtn = h('button', { class: 'link-btn', id: 'ms-reset', onclick: () => { resetScale(); actions.requestUI(); } }, 'Reset');
+
+  const sel = (id, label, items, onPick) => {
+    const el = h('select', { class: 'ms-select', id, 'aria-label': label, 'data-tip': label, 'data-tip-side': 'top' }, ...items.map(([v, t]) => h('option', { value: String(v) }, t)));
+    el.addEventListener('change', () => onPick(el.value));
+    el.addEventListener('keydown', (e) => e.stopPropagation());
+    return el;
+  };
+  // decimals mean inch rounding in feet and inches: switching in or out of it starts again from Auto
+  const lenSel = sel('ms-len', 'Length unit', LENGTH_UNITS.map((u) => [u.id, u.label]), (v) => setMeasUndoable('Change length unit', (v === 'ftin') !== (S.meas.len === 'ftin') ? { len: v, dec: 'auto' } : { len: v }));
+  const areaSel = sel('ms-area', 'Area unit', AREA_UNITS.map((u) => [u.id, u.label]), (v) => setMeasUndoable('Change area unit', { area: v }));
+  const decSel = sel('ms-dec', 'Decimals', DECIMALS, (v) => setMeasUndoable('Change decimals', { dec: v === 'auto' ? 'auto' : +v }));
+
+  const check = (id, label, key, tip, undoLabel) => {
+    const input = h('input', { type: 'checkbox', id, onchange: (e) => setMeasUndoable(undoLabel(e.target.checked), { [key]: e.target.checked }) });
+    return h('label', { class: 'check', 'data-tip': tip, 'data-tip-side': 'top' }, input, h('span', null, label));
+  };
+  const cArea = check('ms-show-area', 'Area', 'showArea', 'Measure the area of each markup', (on_) => (on_ ? 'Show areas' : 'Hide areas'));
+  const cPerim = check('ms-show-perim', 'Perimeter', 'showPerim', 'Measure the length of each markup’s outline', (on_) => (on_ ? 'Show perimeters' : 'Hide perimeters'));
+  const cTags = check('ms-tags', 'Tags', 'tags', 'Write the values inside each markup on the sheet (they print). Drag a tag to move it.', (on_) => (on_ ? 'Show area tags' : 'Hide area tags'));
+  const cLegend = check('ms-legend', 'Legend', 'legend', 'Add the values to the legend as columns, with a total row', (on_) => (on_ ? 'Show values in legend' : 'Hide values in legend'));
+  const cDims = check('ms-dims', 'Dimensions', 'dims', 'Show the dimension lines (they print). Add them with K.', (on_) => (on_ ? 'Show dimensions' : 'Hide dimensions'));
+
+  const dimColor = h('input', { type: 'color', class: 'hidden-color', id: 'ms-dim-color-in' });
+  dimColor.addEventListener('change', () => setMeasUndoable('Change dimension colour', { dimColor: dimColor.value.toUpperCase() }));
+  const dimSw = h('button', { class: 'seg seg-sw ms-dim-sw', id: 'ms-dim-sw', 'data-tip': 'Colour of dimensions', 'data-tip-side': 'top', onclick: () => { dimColor.value = S.meas.dimColor; dimColor.click(); } }, h('span', { class: 'mini-sw', id: 'ms-dim-dot' }));
+  const tVal = h('span', { class: 'step-val', id: 'ms-text' });
+  const tMinus = h('button', { class: 'step-btn', 'aria-label': 'Smaller text', onclick: () => stepText(-1), html: icon('minus', 14) });
+  const tPlus = h('button', { class: 'step-btn', 'aria-label': 'Larger text', onclick: () => stepText(+1), html: icon('plus', 14) });
+
+  const total = h('span', { class: 'ms-total', id: 'ms-total' });
+  const exportBtn = h('button', { class: 'link-btn', id: 'ms-export', 'data-tip': 'Save every markup with its area and perimeter as an Excel or CSV schedule', 'data-tip-side': 'top', onclick: (e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    showMenu(r.left, r.bottom + 4, [
+      { label: 'Excel workbook (.xlsx)…', icon: 'file-spreadsheet', onClick: () => actions.saveAs('xlsx') },
+      { label: 'CSV file…', icon: 'file-text', onClick: () => actions.saveAs('csv') },
+    ]);
+  } }, 'Schedule…');
+  const dimInfo = h('span', { class: 'ms-diminfo', id: 'ms-diminfo' });
+  const clearDims = h('button', { class: 'link-btn', id: 'ms-clear-dims', onclick: () => {
+    const n = S.dims.length;
+    if (!n) return;
+    change(n > 1 ? `Delete ${n} dimensions` : 'Delete dimension', () => { S.dims = []; });
+    toast(n > 1 ? `Deleted ${n} dimensions.` : 'Deleted 1 dimension.', { action: 'Undo', onAction: () => actions.undo && actions.undo() });
+  } }, 'Remove all');
+
+  const body = h('div', { class: 'ms-body', id: 'ms-body' },
+    h('div', { class: 'ms-row' }, h('span', { class: 'ms-label' }, 'Scale'), scaleTxt, resetBtn, calBtn),
+    h('div', { class: 'ms-row' }, h('span', { class: 'ms-label' }, 'Units'), lenSel, areaSel, decSel),
+    h('div', { class: 'ms-row' }, h('span', { class: 'ms-label' }, 'Measure'), cArea, cPerim),
+    h('div', { class: 'ms-row' }, h('span', { class: 'ms-label' }, 'Show'), cTags, cLegend, cDims),
+    h('div', { class: 'ms-row' }, h('span', { class: 'ms-label' }, 'Text'), tMinus, tVal, tPlus, h('span', { class: 'flex' }), h('span', { class: 'ms-sub' }, 'Colour'), dimSw, dimColor),
+    h('div', { class: 'ms-row ms-foot' }, dimInfo, clearDims, h('span', { class: 'flex' }), exportBtn),
+    h('p', { class: 'ms-note', id: 'ms-note' }));
+  const sec = h('section', { class: 'ms-sec', id: 'ms-sec' }, head, body);
+  mEls = { sec, head, sum, scaleTxt, calBtn, resetBtn, lenSel, areaSel, decSel, cArea, cPerim, cTags, cLegend, cDims, tVal, tMinus, tPlus, total, exportBtn, dimInfo, clearDims, dimSw };
+  return sec;
+}
+
+function stepText(dir) {
+  const v = Math.max(4, Math.min(36, Math.round((S.meas.textPt || 8) + dir)));
+  setMeasUndoable('Change text size', { textPt: v });
+}
+
+export function refreshMeasure() {
+  if (!mEls.sec) return;
+  const M = S.meas;
+  const doc = !!S.doc;
+  mEls.sec.classList.toggle('open', measOpen);
+  mEls.head.setAttribute('aria-expanded', String(measOpen));
+  const scaled = doc && hasScale();
+  const src = doc ? scaleSource() : 'none';
+  mEls.sum.textContent = !doc ? '' : scaled ? `${fmtScale()} · ${M.len === 'ftin' ? 'ft-in' : lengthUnitLabel()}` : 'no scale';
+  mEls.sum.classList.toggle('warn', doc && !scaled);
+  const srcText = { title: 'title block', typed: 'typed', calib: 'calibrated', none: '' }[src];
+  mEls.scaleTxt.textContent = !doc ? '—' : scaled ? fmtScale() : 'Not set';
+  mEls.scaleTxt.append(srcText && scaled ? h('span', { class: 'ms-src' }, ' ' + srcText) : '');
+  mEls.scaleTxt.title = scaled ? `${fmtScale()} (${{ title: 'read from the title block', typed: 'typed in the status bar', calib: 'calibrated from a known length' }[src]})` : '';
+  mEls.scaleTxt.classList.toggle('warn', doc && !scaled);
+  mEls.resetBtn.hidden = !(doc && S.calib);
+  mEls.resetBtn.setAttribute('data-tip', S.doc && S.doc.scale ? `Back to the title block scale (1:${S.doc.scale})` : 'Forget this scale');
+  mEls.calBtn.disabled = !doc;
+  mEls.lenSel.value = M.len;
+  mEls.areaSel.value = M.area;
+  const decItems = M.len === 'ftin' ? FTIN_STEPS : DECIMALS;
+  if (mEls.decSel.options.length !== decItems.length || mEls.decSel.options[1].textContent !== decItems[1][1]) {
+    mEls.decSel.innerHTML = '';
+    for (const [v, t] of decItems) mEls.decSel.append(h('option', { value: String(v) }, t));
+  }
+  mEls.decSel.value = String(M.dec);
+  mEls.decSel.setAttribute('data-tip', M.len === 'ftin' ? 'Rounding of inches' : 'Decimals');
+  mEls.cArea.querySelector('input').checked = !!M.showArea;
+  mEls.cPerim.querySelector('input').checked = !!M.showPerim;
+  mEls.cTags.querySelector('input').checked = !!M.tags;
+  mEls.cLegend.querySelector('input').checked = !!M.legend;
+  mEls.cDims.querySelector('input').checked = !!M.dims;
+  document.getElementById('ms-dim-dot').style.background = M.dimColor;
+  mEls.tVal.textContent = (M.textPt || 8) + ' pt';
+  const nd = doc ? S.dims.length : 0;
+  mEls.dimInfo.textContent = nd ? (nd > 1 ? `${nd} dimensions` : '1 dimension') : 'No dimensions yet (K)';
+  mEls.clearDims.hidden = !nd;
+  mEls.exportBtn.disabled = !doc;
+  const note = document.getElementById('ms-note');
+  note.textContent = !doc ? '' : !scaled
+    ? 'Set the scale to measure: Calibrate on a length you know, or type the scale in the bar at the bottom while drawing.'
+    : (M.tags || M.legend) && !(M.showArea || M.showPerim) ? 'Tick Area or Perimeter to show values on the sheet.' : '';
+  note.hidden = !note.textContent;
 }
 
 const fmtPt = (v) => (v === 0 ? 'None' : (Math.round(v * 100) / 100) + ' pt');
@@ -192,6 +338,16 @@ export function refreshStyle() {
   if (t && t.length === 1) { tgt.textContent = t[0].name || 'Untitled'; scope.textContent = 'Selected'; }
   else if (t && t.length > 1) { tgt.textContent = t.length + ' markups'; scope.textContent = 'Selected'; }
   else { tgt.textContent = 'Next markup'; scope.textContent = 'Nothing selected'; }
+  const sd = S.doc ? S.dims.filter((d) => S.selection.has(d.id)) : [];
+  if ((!t || !t.length) && sd.length) {
+    tgt.textContent = sd.length > 1 ? `${sd.length} dimensions` : 'Dimension';
+    scope.textContent = sd.length === 1 ? 'Selected · ' + lengthLabel(Math.hypot(sd[0].b[0] - sd[0].a[0], sd[0].b[1] - sd[0].a[1])) : 'Selected';
+    document.querySelector('.style-card').classList.add('has-sel');
+  }
+  if (t && t.length && S.doc && hasScale() && (S.meas.showArea || S.meas.showPerim)) {
+    const q = totals(new Set(t.map((m) => m.id)));
+    scope.textContent = 'Selected · ' + (S.meas.showArea ? areaLabel(q.area) : 'P ' + lengthLabel(q.perim));
+  }
   document.querySelector('.style-card').classList.toggle('has-sel', !!(t && t.length));
   const tint = document.getElementById('chip-tint');
   tint.style.background = c.color;
@@ -278,8 +434,9 @@ function rowFor(m) {
     const pen = h('button', { class: 'mk-btn pen', 'data-tip': 'Rename', 'data-key': 'F2', 'aria-label': 'Rename', html: icon('pen-line', 15) });
     const loc = h('button', { class: 'mk-btn', 'data-tip': 'Zoom to it', 'aria-label': 'Zoom to it', html: icon('locate', 15) });
     const del = h('button', { class: 'mk-btn del', 'data-tip': 'Delete', 'data-key': 'Del', 'aria-label': 'Delete', html: icon('trash-2', 15) });
-    const el = h('div', { class: 'mk-row', role: 'option', 'data-id': m.id }, sw, name, pen, loc, del);
-    r = { el, sw, name, pen, loc, del, m: null };
+    const meas = h('span', { class: 'mk-meas' });
+    const el = h('div', { class: 'mk-row', role: 'option', 'data-id': m.id }, sw, name, meas, pen, loc, del);
+    r = { el, sw, name, meas, pen, loc, del, m: null, mt: '' };
     rowMap.set(m.id, r);
     const id = m.id;
     el.addEventListener('pointerdown', (e) => {
@@ -332,16 +489,33 @@ export function refreshList() {
   const ids = new Set(S.markups.map((m) => m.id));
   for (const [id, r] of rowMap) if (!ids.has(id)) { r.el.remove(); rowMap.delete(id); }
   let prev = null;
-  for (const m of S.markups) {
+  const showA = !!(S.doc && hasScale() && S.meas.showArea), showP = !!(S.doc && hasScale() && S.meas.showPerim);
+  S.markups.forEach((m, i) => {
     const r = rowFor(m);
+    // area and perimeter of what is visible
+    let mt = '';
+    if (showA || showP) {
+      const q = measureAt(i);
+      mt = [showA ? areaLabel(q.area) : '', showP ? 'P ' + lengthLabel(q.perim) : ''].filter(Boolean).join('\n');
+    }
+    if (mt !== r.mt) {
+      r.mt = mt;
+      r.meas.innerHTML = '';
+      for (const line of mt ? mt.split('\n') : []) r.meas.append(h('span', null, line));
+      r.meas.classList.toggle('two', mt.includes('\n'));
+    }
     const want = prev ? prev.nextSibling : list.firstChild;
     if (want !== r.el) list.insertBefore(r.el, want);
     r.el.classList.toggle('sel', S.selection.has(m.id));
     r.el.setAttribute('aria-selected', S.selection.has(m.id) ? 'true' : 'false');
     prev = r.el;
-  }
+  });
   document.getElementById('list-count').textContent = S.markups.length;
   els.empty.hidden = S.markups.length > 0;
+  const tot = document.getElementById('list-total');
+  const t = (showA || showP) && S.markups.length ? totals() : null;
+  tot.textContent = t ? (showA ? areaLabel(t.area) : 'P ' + lengthLabel(t.perim)) : '';
+  tot.hidden = !t;
 }
 
 export function revealInList(id) {

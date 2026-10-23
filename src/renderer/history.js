@@ -2,7 +2,7 @@
 // gap lines and the legend are immutable values, snapshots only copy array references.
 // Colour taken out of the drawing is tracked as raster ops; the engine keeps their pixels.
 
-import { S, emit } from './state.js';
+import { S, emit, saveMeasPrefs } from './state.js';
 import * as engine from './engine.js';
 
 const LIMIT = 200;
@@ -13,7 +13,7 @@ let savedId = 0;         // state last saved in any form (project or picture)
 let projectSavedId = 0;  // state last saved as an editable project
 let busy = Promise.resolve();
 
-export const snapshot = () => ({ markups: S.markups, gaps: S.gaps, legend: S.legend, ops: S.rasterOps });
+export const snapshot = () => ({ markups: S.markups, gaps: S.gaps, legend: S.legend, ops: S.rasterOps, dims: S.dims, meas: S.meas, calib: S.calib });
 
 const currentId = () => (undoStack.length ? undoStack[undoStack.length - 1].id : 0);
 export const stateId = currentId;
@@ -47,7 +47,8 @@ export function resetHistory() {
 }
 
 function sameSnap(a, b) {
-  return a.markups === b.markups && a.gaps === b.gaps && a.legend === b.legend && a.ops === b.ops;
+  return a.markups === b.markups && a.gaps === b.gaps && a.legend === b.legend && a.ops === b.ops
+    && a.dims === b.dims && a.meas === b.meas && a.calib === b.calib;
 }
 
 function opsIn(entries) {
@@ -96,15 +97,21 @@ async function applySnapshot(t) {
   for (const o of revert) await engine.call('revertOp', { opId: o.id });
   for (const o of apply) await engine.call('reapplyOp', { opId: o.id });
   const gapsChanged = S.gaps !== t.gaps;
+  const scaleChanged = S.calib !== t.calib || S.meas !== t.meas;
+  if (S.meas !== t.meas) saveMeasPrefs(t.meas);
   S.markups = t.markups;
   S.gaps = t.gaps;
   S.legend = t.legend;
   S.rasterOps = t.ops;
+  S.dims = t.dims;
+  S.meas = t.meas;
+  S.calib = t.calib;
   if (gapsChanged) await engine.call('setGaps', { lines: S.gaps.map((g) => g.pts) });
-  const ids = new Set(S.markups.map((m) => m.id));
+  const ids = new Set([...S.markups.map((m) => m.id), ...S.dims.map((d) => d.id)]);
   S.selection = new Set([...S.selection].filter((id) => ids.has(id)));
   if (!S.legend || !S.legend.visible) S.legendSelected = false;
   emit('selection');
+  if (scaleChanged) emit('scale');
   emit('doc');
 }
 

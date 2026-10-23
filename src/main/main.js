@@ -179,8 +179,10 @@ const SAVE_FILTERS = {
   pdfflat: { name: 'PDF document (flattened)', extensions: ['pdf'] },
   png: { name: 'PNG picture', extensions: ['png'] },
   jpg: { name: 'JPEG picture', extensions: ['jpg', 'jpeg'] },
+  xlsx: { name: 'Excel workbook', extensions: ['xlsx'] },
+  csv: { name: 'CSV (comma separated)', extensions: ['csv'] },
 };
-const KNOWN_EXT = ['.plantint', '.pdf', '.png', '.jpg', '.jpeg'];
+const KNOWN_EXT = ['.plantint', '.pdf', '.png', '.jpg', '.jpeg', '.xlsx', '.csv'];
 
 /** Asks where to save one kind of file. The kind is chosen in the app before this. */
 ipcMain.handle('dlg:save', async (_e, opts) => {

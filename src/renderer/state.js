@@ -16,13 +16,40 @@ export function emit(evt, data) {
 let idSeq = Date.now() % 1e6;
 export const uid = (p = 'm') => p + (++idSeq).toString(36) + Math.random().toString(36).slice(2, 6);
 
+/**
+ * Measuring settings (saved with the project; the last ones used start new drawings).
+ * len/area: units; dec: decimals ('auto' or 0..4); showArea/showPerim: what is measured and
+ * shown; tags: the values written on the sheet in each markup; legend: the values as legend
+ * columns; dims: dimension lines shown and exported; textPt: text size of tags and dimensions.
+ */
+export const MEAS_DEFAULT = Object.freeze({
+  len: 'm', area: 'm2', dec: 'auto',
+  showArea: true, showPerim: false,
+  tags: false, legend: false, dims: true,
+  textPt: 8, dimColor: '#B42318',
+});
+
+export function loadMeasPrefs() {
+  try {
+    const v = JSON.parse(localStorage.getItem('plantint.meas') || 'null');
+    if (v && typeof v === 'object') return Object.freeze({ ...MEAS_DEFAULT, ...v });
+  } catch { /* storage is optional */ }
+  return MEAS_DEFAULT;
+}
+export function saveMeasPrefs(m) {
+  try { localStorage.setItem('plantint.meas', JSON.stringify(m)); } catch { /* storage is optional */ }
+}
+
 export const S = {
   doc: null,            // see io.js: { name, path, kind, ext, bytes, pageIndex, pageCount, dpi, W, H, pageSizePt, text, paper, scale, projectPath }
   markups: [],
   gaps: [],
+  dims: [],             // dimension lines: [{ id, a: [x, y], b: [x, y], off }] (sheet pixels)
   legend: null,         // { visible, x, y, titlePx, namePx, merge }
   rasterOps: [],        // [{ id, label }] colour taken out of the drawing (pixel data lives in the engine)
-  selection: new Set(), // markup ids
+  calib: null,          // the drawing's scale when set here: { kind: 'calib'|'typed', mPerPx, a, b, lengthM, unit }
+  meas: MEAS_DEFAULT,   // measuring settings, see MEAS_DEFAULT
+  selection: new Set(), // markup and dimension ids
   legendSelected: false,
   tool: 'select',
   style: { color: '#FFD60A', opacity: 0.45, borderPt: 0, borderColor: null, borderStyle: 'solid' },
@@ -71,6 +98,21 @@ export function makeMarkup({ kind, rings, name, style }) {
 
 export function withProps(m, props) {
   return Object.freeze({ ...m, ...props });
+}
+
+// ------------------------------------------------------------------ dimension helpers
+
+export const isDimId = (id) => typeof id === 'string' && id[0] === 'd';
+export const selectedDims = () => S.dims.filter((d) => S.selection.has(d.id));
+
+export function makeDim(a, b, off = 0) {
+  return Object.freeze({ id: uid('d'), a: [a[0], a[1]], b: [b[0], b[1]], off });
+}
+
+/** Sets measuring settings as one value (callers wrap it in an undo step). */
+export function setMeas(props) {
+  S.meas = Object.freeze({ ...S.meas, ...props });
+  saveMeasPrefs(S.meas);
 }
 
 /** Points (pt on the printed sheet) to sheet pixels. */

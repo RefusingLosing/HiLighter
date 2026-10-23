@@ -6,10 +6,13 @@ cd "$(dirname "$0")/.." || exit 1
 if [ ! -d "${PLANTINT_TESTDATA:-testdata/out}" ]; then
   mkdir -p testdata/out && python3 testdata/make_plans.py testdata/out && python3 testdata/make_more.py testdata/out && python3 testdata/make_layers.py testdata/out/plan_A3_single.pdf testdata/out/plan_layers.pdf || exit 1
 fi
-node build.mjs || exit 1
+[ "$PLANTINT_NO_BUILD" = 1 ] || node build.mjs || exit 1
 fails=0
+printf '%-16s ' unit
+if node --no-warnings test/unit/measure_test.mjs > /tmp/plantint-unit.log 2>&1; then tail -1 /tmp/plantint-unit.log
+else echo "FAILED (see /tmp/plantint-unit.log)"; grep FAIL /tmp/plantint-unit.log; fails=$((fails+1)); fi
 node test/harness/pdf_export_test.mjs >/dev/null && python3 test/pdfcheck/check_basic.py | tail -1 && python3 test/pdfcheck/check_layers.py | tail -1 || fails=$((fails+1))
-for t in t0_regression t1_pdf_export t1b_sources t2_rect t3_linestyle t4_detect t5_eraser; do
+for t in t0_regression t1_pdf_export t1b_sources t2_rect t3_linestyle t4_detect t5_eraser t6_measure; do
   printf '%-16s ' "$t"
   if xvfb-run -a -s "-screen 0 1920x1080x24" node "test/e2e/$t.mjs" > "/tmp/plantint-$t.log" 2>&1; then
     tail -1 "/tmp/plantint-$t.log"

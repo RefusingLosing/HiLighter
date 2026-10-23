@@ -31,6 +31,7 @@ const E = {
   walls: new Map(), wallMask: null, wallKey: '',
   paper: [255, 255, 255],
   ink: null,
+  vec: null,          // the PDF page's line geometry in sheet pixels, for exact snapping (built on first use)
 };
 
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
@@ -51,6 +52,136 @@ function freeRaster() {
   E.ops.clear(); E.found.clear();
   E.walls.clear(); E.wallMask = null; E.wallKey = '';
   E.ink = null;
+  E.vec = null;
+}
+
+// ------------------------------------------------------------------ vector geometry (PDF drawings)
+
+/**
+ * Collects every straight piece of the page's line work, in sheet pixels, into a grid. Snapping
+ * then lands on the drawing's own coordinates: the line itself for thin lines (a wall outline is
+ * the wall face), and both faces of thick stroked lines. Pictures have no geometry: they use
+ * the edges of the ink instead.
+ */
+async function vectors() {
+  if (E.vec !== null) return E.vec;
+  if (!E.dl || E.srcExt !== 'pdf') { E.vec = false; return false; }
+  const mupdf = await MU();
+  const ib = E.ib, s = E.pageScale;
+  const MAX = 1.5e6;
+  let buf = new Float32Array(1 << 16), n = 0;
+  const push = (ax, ay, bx, by) => {
+    if (n >= MAX) return;
+    if ((n + 1) * 4 > buf.length) { const nb = new Float32Array(buf.length * 2); nb.set(buf); buf = nb; }
+    const o = n * 4;
+    buf[o] = ax; buf[o + 1] = ay; buf[o + 2] = bx; buf[o + 3] = by;
+    n++;
+  };
+  const walk = (path, ctm, half) => {
+    const [a, b, c, d, e, f] = ctm;
+    const tx = (x, y) => a * x + c * y + e - ib[0], ty = (x, y) => b * x + d * y + f - ib[1];
+    let cx = 0, cy = 0, sx = 0, sy = 0;
+    const seg = (ax, ay, bx, by, faces) => {
+      push(ax, ay, bx, by);
+      if (faces && half > 0) {
+        const L = Math.hypot(bx - ax, by - ay);
+        if (!L) return;
+        const nx = (-(by - ay) / L) * half, ny = ((bx - ax) / L) * half;
+        push(ax + nx, ay + ny, bx + nx, by + ny);
+        push(ax - nx, ay - ny, bx - nx, by - ny);
+      }
+    };
+    path.walk({
+      moveTo(x, y) { cx = tx(x, y); cy = ty(x, y); sx = cx; sy = cy; },
+      lineTo(x, y) { const nx = tx(x, y), ny = ty(x, y); seg(cx, cy, nx, ny, true); cx = nx; cy = ny; },
+      curveTo(x1, y1, x2, y2, x3, y3) {
+        const p1x = tx(x1, y1), p1y = ty(x1, y1), p2x = tx(x2, y2), p2y = ty(x2, y2), p3x = tx(x3, y3), p3y = ty(x3, y3);
+        let px = cx, py = cy;
+        for (let i = 1; i <= 8; i++) {
+          const t = i / 8, u = 1 - t;
+          const qx = u * u * u * cx + 3 * u * u * t * p1x + 3 * u * t * t * p2x + t * t * t * p3x;
+          const qy = u * u * u * cy + 3 * u * u * t * p1y + 3 * u * t * t * p2y + t * t * t * p3y;
+          seg(px, py, qx, qy, false);
+          px = qx; py = qy;
+        }
+        cx = p3x; cy = p3y;
+      },
+      closePath() { if (cx !== sx || cy !== sy) seg(cx, cy, sx, sy, true); cx = sx; cy = sy; },
+    });
+  };
+  // paint in paper white (openings cut out of walls, masks) is not line work
+  const invisible = (color, alpha) => {
+    if (!(alpha > 0.05)) return true;
+    if (!color || !color.length) return false;
+    if (color.length === 4) return Math.max(...color) < 0.03;
+    return Math.min(...color) > 0.97;
+  };
+  const dev = new mupdf.Device({
+    fillPath(path, evenOdd, ctm, cs, color, alpha) { if (!invisible(color, alpha)) walk(path, ctm, 0); },
+    strokePath(path, stroke, ctm, cs, color, alpha) {
+      if (invisible(color, alpha)) return;
+      let half = 0;
+      try {
+        const w = stroke.getLineWidth() * Math.sqrt(Math.abs(ctm[0] * ctm[3] - ctm[1] * ctm[2]));
+        if (w > Math.max(4, E.dpi / 75)) half = w / 2;
+      } catch { /* no width */ }
+      walk(path, ctm, half);
+    },
+  });
+  try {
+    E.dl.run(dev, mupdf.Matrix.scale(s, s));
+    dev.close();
+  } finally { dev.destroy(); }
+  // a grid of cells, each listing the pieces that cross it (compressed rows)
+  const cell = 128, cols = Math.max(1, Math.ceil(E.W / cell)), rows = Math.max(1, Math.ceil(E.H / cell));
+  const cellsOf = (i, fn) => {
+    const o = i * 4;
+    const c0 = Math.max(0, Math.floor(Math.min(buf[o], buf[o + 2]) / cell)), c1 = Math.min(cols - 1, Math.floor(Math.max(buf[o], buf[o + 2]) / cell));
+    const r0 = Math.max(0, Math.floor(Math.min(buf[o + 1], buf[o + 3]) / cell)), r1 = Math.min(rows - 1, Math.floor(Math.max(buf[o + 1], buf[o + 3]) / cell));
+    if (c1 < c0 || r1 < r0) return;
+    if ((c1 - c0 + 1) * (r1 - r0 + 1) > 4096) return; // a huge diagonal: not useful for snapping
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) fn(r * cols + c);
+  };
+  const start = new Int32Array(cols * rows + 1);
+  for (let i = 0; i < n; i++) cellsOf(i, (k) => { start[k + 1]++; });
+  for (let k = 0; k < cols * rows; k++) start[k + 1] += start[k];
+  const fill = start.slice(0, cols * rows);
+  const idx = new Int32Array(start[cols * rows]);
+  for (let i = 0; i < n; i++) cellsOf(i, (k) => { idx[fill[k]++] = i; });
+  E.vec = { segs: buf.subarray(0, n * 4), n, cell, cols, rows, start, idx };
+  return E.vec;
+}
+
+/** Faces near (x, y): x of upright pieces within r across, y of level pieces within r up or down, passing the pointer. */
+function vectorSnap(v, x, y, r) {
+  const L = 1.5 * r;
+  const xs = [], ys = [];
+  const c0 = Math.max(0, Math.floor((x - L) / v.cell)), c1 = Math.min(v.cols - 1, Math.floor((x + L) / v.cell));
+  const r0 = Math.max(0, Math.floor((y - L) / v.cell)), r1 = Math.min(v.rows - 1, Math.floor((y + L) / v.cell));
+  const seen = new Set();
+  const S_ = v.segs;
+  for (let rr = r0; rr <= r1; rr++) {
+    for (let cc = c0; cc <= c1; cc++) {
+      const k = rr * v.cols + cc;
+      for (let q = v.start[k]; q < v.start[k + 1]; q++) {
+        const i = v.idx[q];
+        if (seen.has(i)) continue;
+        seen.add(i);
+        const o = i * 4;
+        const ax = S_[o], ay = S_[o + 1], bx = S_[o + 2], by = S_[o + 3];
+        const dx = Math.abs(bx - ax), dy = Math.abs(by - ay);
+        if (dy > 0.5 && dx <= Math.max(0.15, dy * 0.002)) {
+          // upright
+          const sx = (ax + bx) / 2;
+          if (Math.abs(sx - x) <= r && Math.max(ay, by) >= y - L && Math.min(ay, by) <= y + L) xs.push(sx);
+        } else if (dx > 0.5 && dy <= Math.max(0.15, dx * 0.002)) {
+          const sy = (ay + by) / 2;
+          if (Math.abs(sy - y) <= r && Math.max(ax, bx) >= x - L && Math.min(ax, bx) <= x + L) ys.push(sy);
+        }
+      }
+    }
+  }
+  return { xs, ys };
 }
 
 /** Existing markups act as walls for Fill: keeps a pixel mask of them, rebuilt only when they change. */
@@ -530,7 +661,17 @@ H_.sample = ({ x, y }) => {
 
 H_.colourAt = ({ x, y }) => (E.raster ? colourAt(E.raster, E.W, E.H, x, y, E.paper) : null);
 
-H_.snapLines = ({ x, y, r }) => (E.raster ? IP.snapEdges(E.raster, E.W, E.H, x, y, Math.max(3, Math.round(r)), E.paper) : { xs: [], ys: [] });
+H_.snapLines = async ({ x, y, r }) => {
+  if (!E.raster) return { xs: [], ys: [] };
+  const rr = Math.max(3, Math.round(r));
+  let v = null;
+  try { v = await vectors(); } catch { E.vec = false; }
+  // a PDF's own geometry where it has lines here; the edges of the ink elsewhere (pictures, scans, text)
+  const vs = v ? vectorSnap(v, x, y, rr) : { xs: [], ys: [] };
+  if (vs.xs.length && vs.ys.length) return { ...vs, vector: true };
+  const rs = IP.snapEdges(E.raster, E.W, E.H, x, y, rr, E.paper);
+  return { xs: vs.xs.length ? vs.xs : rs.xs, ys: vs.ys.length ? vs.ys : rs.ys, vector: !!(vs.xs.length || vs.ys.length) };
+};
 
 H_.setGaps = ({ lines }) => {
   if (!E.raster) return true;
@@ -776,8 +917,45 @@ function drawMarkupReplace(o, m) {
   }
 }
 
-/** Draws rows y0..y0+bh of the finished sheet (drawing, highlights, legend) into ctx at (0,0). */
-function composeBand(ctx, y0, bh, markups, legend, overlay) {
+/** Decodes the dimension and tag pictures once per export. */
+async function annotBitmaps(annots) {
+  if (!annots) return null;
+  const images = [];
+  for (const im of annots.images || []) images.push({ ...im, bitmap: await createImageBitmap(new Blob([im.png], { type: 'image/png' })) });
+  return { lines: annots.lines || [], images };
+}
+function closeAnnots(a) { if (a) for (const im of a.images) im.bitmap.close(); }
+
+/** Dimension lines (vectors) and their text and area tags (pictures) for rows y0..y0+bh. */
+function drawAnnotsBand(ctx, y0, bh, an) {
+  if (!an || (!an.lines.length && !an.images.length)) return;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, -y0);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.lineCap = 'butt';
+  for (const l of an.lines) {
+    const p = l.pts;
+    if (Math.max(p[1], p[3]) + l.w < y0 || Math.min(p[1], p[3]) - l.w > y0 + bh) continue;
+    ctx.strokeStyle = css(l.color, 1);
+    ctx.lineWidth = l.w;
+    ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(p[2], p[3]); ctx.stroke();
+  }
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  for (const im of an.images) {
+    const r = Math.hypot(im.w, im.h) / 2;
+    if (im.cy + r < y0 || im.cy - r > y0 + bh) continue;
+    ctx.save();
+    ctx.translate(im.cx, im.cy);
+    if (im.ang) ctx.rotate(im.ang);
+    ctx.drawImage(im.bitmap, -im.w / 2, -im.h / 2, im.w, im.h);
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+/** Draws rows y0..y0+bh of the finished sheet (drawing, highlights, dimensions and tags, legend) into ctx at (0,0). */
+function composeBand(ctx, y0, bh, markups, legend, overlay, annots = null) {
   const { W } = E;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalCompositeOperation = 'source-over';
@@ -801,6 +979,7 @@ function composeBand(ctx, y0, bh, markups, legend, overlay) {
       ctx.globalCompositeOperation = 'source-over';
     }
   }
+  drawAnnotsBand(ctx, y0, bh, annots);
   if (legend && legend.bitmap && legend.y < y0 + bh && legend.y + legend.h > y0) {
     ctx.drawImage(legend.bitmap, legend.x, legend.y - y0, legend.w, legend.h);
   }
@@ -843,11 +1022,12 @@ function withDpi(bytes, type, dpi) {
   return bytes;
 }
 
-H_.exportImage = async ({ type, quality, markups, legend }, id) => {
+H_.exportImage = async ({ type, quality, markups, legend, annots }, id) => {
   const prog = progressFor(id);
   const { W, H } = E;
   prog(0.05, 'Composing the sheet');
   const lg = await legendBitmapOf(legend);
+  const an = await annotBitmaps(annots);
   const cv = new OffscreenCanvas(W, H);
   const ctx = cv.getContext('2d');
   const BH = Math.min(H, 2048);
@@ -856,11 +1036,12 @@ H_.exportImage = async ({ type, quality, markups, legend }, id) => {
   const bctx = band.getContext('2d');
   for (let y0 = 0; y0 < H; y0 += BH) {
     const bh = Math.min(BH, H - y0);
-    composeBand(bctx, y0, bh, markups, lg, overlay);
+    composeBand(bctx, y0, bh, markups, lg, overlay, an);
     ctx.drawImage(band, 0, 0, W, bh, 0, y0, W, bh);
     prog(0.05 + 0.5 * ((y0 + bh) / H), 'Composing the sheet');
   }
   if (lg) lg.bitmap.close();
+  closeAnnots(an);
   prog(0.6, type === 'png' ? 'Compressing the PNG' : 'Compressing the JPEG');
   const blob = await cv.convertToBlob(type === 'jpg' ? { type: 'image/jpeg', quality: quality || 0.92 } : { type: 'image/png' });
   const bytes = withDpi(new Uint8Array(await blob.arrayBuffer()), type, E.dpi);
@@ -945,6 +1126,20 @@ function addPlainImage(out, rgb, w, h, alpha) {
   return out.addRawStream(zlibSync(rgb, { level: 6 }), dict);
 }
 
+/** A PNG with transparency as RGB bytes plus an 8-bit alpha channel. */
+async function rgbaOfPng(png) {
+  const bmp = await createImageBitmap(new Blob([png], { type: 'image/png' }));
+  const w = bmp.width, h = bmp.height;
+  const c = new OffscreenCanvas(w, h);
+  const x = c.getContext('2d');
+  x.drawImage(bmp, 0, 0);
+  bmp.close();
+  const d = x.getImageData(0, 0, w, h).data;
+  const rgb = new Uint8Array(w * h * 3), alpha = new Uint8Array(w * h);
+  for (let i = 0, j = 0, k = 0; i < d.length; i += 4, j += 3, k++) { rgb[j] = d[i]; rgb[j + 1] = d[i + 1]; rgb[j + 2] = d[i + 2]; alpha[k] = d[i + 3]; }
+  return { rgb, alpha, w, h };
+}
+
 /** The legend picture flattened onto white (it is an opaque table) as RGB bytes. */
 async function legendRgb(lg) {
   const bmp = await createImageBitmap(new Blob([lg.png], { type: 'image/png' }));
@@ -965,7 +1160,7 @@ async function legendRgb(lg) {
  * (vector, text, layers); colour taken out of the drawing is covered with picture patches.
  * mode 'flat' writes one picture of the finished sheet instead (same look in every program).
  */
-H_.exportPdf = async ({ mode, markups, legend, title }, id) => {
+H_.exportPdf = async ({ mode, markups, legend, annots, title }, id) => {
   const mupdf = await MU();
   const prog = progressFor(id);
   const { W, H } = E;
@@ -1006,6 +1201,7 @@ H_.exportPdf = async ({ mode, markups, legend, title }, id) => {
     if (mode === 'flat') {
       // the finished sheet as one picture
       const lgb = await legendBitmapOf(lg);
+      const anb = await annotBitmaps(annots);
       rgb = new Uint8Array(W * H * 3);
       const BH = Math.min(H, 1024);
       const band = new OffscreenCanvas(W, BH);
@@ -1013,12 +1209,13 @@ H_.exportPdf = async ({ mode, markups, legend, title }, id) => {
       const overlay = new OffscreenCanvas(W, BH);
       for (let y0 = 0; y0 < H; y0 += BH) {
         const bh = Math.min(BH, H - y0);
-        composeBand(bctx, y0, bh, markups, lgb, overlay);
+        composeBand(bctx, y0, bh, markups, lgb, overlay, anb);
         const data = bctx.getImageData(0, 0, W, bh).data;
         rgb.set(rgbBytes(data, W, 0, 0, W, bh), y0 * W * 3);
         prog(0.1 + 0.5 * ((y0 + bh) / H), 'Writing the PDF');
       }
       if (lgb) lgb.bitmap.close();
+      closeAnnots(anb);
     } else {
       rgb = rgbBytes(E.raster, W, 0, 0, W, H);
     }
@@ -1096,6 +1293,28 @@ H_.exportPdf = async ({ mode, markups, legend, title }, id) => {
     }
     ops.push('Q');
   }
+  // dimensions (vector lines) and their text and area tags (pictures with transparency)
+  if (annots && mode !== 'flat') {
+    if (annots.lines && annots.lines.length) {
+      ops.push('q 0 J 0 j [] 0 d');
+      for (const l of annots.lines) {
+        const p = l.pts;
+        ops.push(`${rgbOp(l.color)} RG ${pn(l.w)} w ${pn(p[0])} ${pn(p[1])} m ${pn(p[2])} ${pn(p[3])} l S`);
+      }
+      ops.push('Q');
+    }
+    let ti = 0;
+    for (const im of annots.images || []) {
+      const px = await rgbaOfPng(im.png);
+      const name = 'PlanTintT' + ti++;
+      xobj.put(name, addPlainImage(out, px.rgb, px.w, px.h, px.alpha)); nX++;
+      // the image's unit square onto the label's box, turned about its centre (sheet pixels, y down)
+      const c = Math.cos(im.ang || 0), sn = Math.sin(im.ang || 0);
+      const x0 = -im.w / 2, yb = im.h / 2;
+      const mat = [c * im.w, sn * im.w, sn * im.h, -c * im.h, c * x0 - sn * yb + im.cx, sn * x0 + c * yb + im.cy];
+      ops.push(`q ${mat.map(pn).join(' ')} cm /${name} Do Q`);
+    }
+  }
   // legend
   if (lg && mode !== 'flat') {
     const L = await legendRgb(lg);
@@ -1143,7 +1362,7 @@ H_.exportPdf = async ({ mode, markups, legend, title }, id) => {
   }
   try {
     if (title) out.setMetaData('info:Title', title);
-    out.setMetaData('info:Creator', 'PlanTint 1.1');
+    out.setMetaData('info:Creator', 'PlanTint 1.2');
   } catch { /* metadata is optional */ }
   prog(0.9, 'Compressing the PDF');
   const buf = out.saveToBuffer('compress,compress-images,compress-fonts,garbage');

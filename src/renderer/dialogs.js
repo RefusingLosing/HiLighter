@@ -10,6 +10,7 @@ import { nameFromText } from './tools.js';
 import { refreshList } from './panel.js';
 import { pointInRings } from './geom.js';
 import { V } from './view.js';
+import { LENGTH_UNITS, parseRealLength, fmtLengthIn, fmtNum } from './units.js';
 
 // ------------------------------------------------------------------ page picker
 
@@ -363,6 +364,63 @@ export async function detectColours(hooks) {
   run();
 }
 
+// ------------------------------------------------------------------ calibrate
+
+const TYPED_UNIT = { mm: 'mm', cm: 'cm', m: 'm', km: 'km', in: 'in', inch: 'in', inches: 'in', ft: 'ft', feet: 'ft', foot: 'ft', yd: 'yd', yds: 'yd' };
+
+/** The unit a typed length is in: its own suffix, feet-and-inches marks, or the chosen unit. */
+function typedUnit(text, fallback) {
+  const t = String(text || '').trim().toLowerCase();
+  if (/['"′″’”]/.test(t)) return 'ftin';
+  const m = /([a-z]+)$/.exec(t);
+  return (m && TYPED_UNIT[m[1]]) || fallback;
+}
+
+/**
+ * Asks how long the line just drawn (px sheet pixels) is in reality.
+ * Resolves with { lengthM, unit } or null.
+ */
+export function calibrateDialog({ px }) {
+  const d = S.doc;
+  const paperMm = d.physical ? (px / d.dpi) * 25.4 : 0;
+  const unit0 = S.meas.len;
+  const input = h('input', { class: 'cal-in', id: 'cal-len', inputmode: 'decimal', autocomplete: 'off', spellcheck: 'false', 'data-submit': '', 'aria-label': 'Real length', placeholder: unit0 === 'ftin' ? '12\'6"' : unit0 === 'mm' ? '4400' : '4.40' });
+  const sel = h('select', { class: 'cal-unit', id: 'cal-unit', 'aria-label': 'Unit' }, ...LENGTH_UNITS.map((u) => h('option', { value: u.id, selected: u.id === unit0 }, `${u.label}  (${u.name.toLowerCase()})`)));
+  const res = h('p', { class: 'cal-result', id: 'cal-result' });
+  const read = () => { const m = parseRealLength(input.value, sel.value); return m > 0 ? m : NaN; };
+  const update = () => {
+    const m = read();
+    if (!(m > 0)) { res.textContent = input.value.trim() ? 'That length is not readable. Try 4.40, 4400 mm or 14\'5".' : 'Type the real length.'; res.classList.add('muted'); return; }
+    res.classList.remove('muted');
+    const mpp = m / px;
+    const n = d.physical ? (mpp * d.dpi) / 0.0254 : 0;
+    let t = n ? `Scale 1:${n >= 100 ? n.toFixed(0) : n.toFixed(1)}` : `1 pixel = ${fmtLengthIn(mpp, 'mm', 2)}`;
+    if (n && d.scale && Math.abs(n - d.scale) / d.scale > 0.02) t += `. The title block says 1:${d.scale}.`;
+    res.textContent = t;
+  };
+  input.addEventListener('input', update);
+  sel.addEventListener('change', update);
+  const intro = paperMm ? `The line you drew is ${fmtNum(paperMm, 1)} mm long on the sheet.` : `The line you drew is ${Math.round(px)} pixels long.`;
+  const body = h('div', null,
+    h('p', { class: 'modal-text' }, intro + ' How long is it in reality?'),
+    h('div', { class: 'cal-row' }, input, sel),
+    res,
+    h('p', { class: 'modal-text small' }, 'For the best accuracy use the longest length you know, such as an overall dimension or a grid spacing.'));
+  return modal({
+    title: 'Calibrate the scale',
+    body,
+    buttons: [
+      { label: 'Cancel', value: null },
+      { label: 'Set scale', primary: true, value: () => {
+        const m = read();
+        if (!(m > 0)) { input.focus(); update(); return undefined; }
+        return { lengthM: m, unit: typedUnit(input.value, sel.value) };
+      } },
+    ],
+    onMount: () => { update(); setTimeout(() => input.focus(), 40); },
+  });
+}
+
 // ------------------------------------------------------------------ save type chooser
 
 export const SAVE_TYPES = [
@@ -371,17 +429,23 @@ export const SAVE_TYPES = [
   { id: 'pdfflat', ext: 'pdf', icon: 'file-image', title: 'PDF, flattened', text: 'The finished sheet as one picture inside a PDF. Looks the same in every program, including CAD.' },
   { id: 'png', ext: 'png', icon: 'image', title: 'PNG picture', text: 'Full resolution and sharp lines. Prints at the drawing’s real size.' },
   { id: 'jpg', ext: 'jpg', icon: 'image', title: 'JPEG picture', text: 'Smaller file for sending; lines are slightly softer.' },
+  { id: 'xlsx', ext: 'xlsx', icon: 'file-spreadsheet', schedule: true, title: 'Schedule (Excel)', text: 'Each markup with its area and perimeter, totals by colour, and the dimensions. Needs a scale.' },
+  { id: 'csv', ext: 'csv', icon: 'file-spreadsheet', schedule: true, title: 'Schedule (CSV)', text: 'The same table as plain text, for any spreadsheet or database.' },
 ];
 
 let lastType = null;
 try { lastType = localStorage.getItem('plantint.saveType'); } catch { /* storage is optional */ }
 
-/** Asks which kind of file to save. Resolves with a SAVE_TYPES id or null. */
-export function chooseSaveType(defaultType) {
+/**
+ * Asks which kind of file to save. Resolves with a SAVE_TYPES id or null. keepWork: the question
+ * is about keeping the marking (before closing), so schedules, which do not keep it, are left out.
+ */
+export function chooseSaveType(defaultType, keepWork = false) {
+  const types = SAVE_TYPES.filter((t) => !keepWork || !t.schedule);
   let chosen = defaultType || lastType || 'plantint';
-  if (!SAVE_TYPES.some((t) => t.id === chosen)) chosen = 'plantint';
+  if (!types.some((t) => t.id === chosen)) chosen = 'plantint';
   const list = h('div', { class: 'save-types', role: 'radiogroup' });
-  const cards = SAVE_TYPES.map((t) => {
+  const cards = types.map((t) => {
     const c = h('button', { class: 'save-type' + (t.id === chosen ? ' on' : ''), role: 'radio', 'aria-checked': t.id === chosen ? 'true' : 'false', 'data-id': t.id },
       h('span', { class: 'st-ico', html: icon(t.icon, 20) }),
       h('span', { class: 'st-txt' }, h('strong', null, t.title, h('span', { class: 'st-ext' }, '.' + t.ext)), h('span', null, t.text)));
@@ -401,8 +465,8 @@ export function chooseSaveType(defaultType) {
       list.addEventListener('keydown', (e) => {
         if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
         e.preventDefault();
-        const i = SAVE_TYPES.findIndex((t) => t.id === chosen);
-        const j = Math.max(0, Math.min(SAVE_TYPES.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)));
+        const i = types.findIndex((t) => t.id === chosen);
+        const j = Math.max(0, Math.min(types.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)));
         cards[j].click(); cards[j].focus();
       });
     },
@@ -416,7 +480,8 @@ export function chooseSaveType(defaultType) {
 
 export function showHelp() {
   const rows = [
-    ['Tools', [['S', 'Select and move'], ['F', 'Fill an enclosed area'], ['P', 'Polygon'], ['R', 'Rectangle'], ['G', 'Gap line (stops Fill at openings)'], ['I', 'Pick a colour'], ['E', 'Eraser (highlights and drawing colour)'], ['M', 'Magnifier'], ['L', 'Legend on sheet'], ['D', 'Find painted colour']]],
+    ['Tools', [['S', 'Select and move'], ['F', 'Fill an enclosed area'], ['P', 'Polygon'], ['R', 'Rectangle'], ['G', 'Gap line (stops Fill at openings)'], ['K', 'Dimension'], ['C', 'Calibrate the scale'], ['I', 'Pick a colour'], ['E', 'Eraser (highlights and drawing colour)'], ['M', 'Magnifier'], ['L', 'Legend on sheet'], ['D', 'Find painted colour']]],
+    ['Dimension (K) and Calibrate (C)', [['Click, click', 'The two points to measure between'], ['Click again', 'Where the dimension line goes (Enter: on the points)'], ['Shift', 'Horizontal or vertical'], ['Ctrl', 'Hold to stop snapping'], ['Backspace', 'Back one step'], ['Drag an end', 'Move a point of a selected dimension'], ['Drag the dot', 'Move the dimension line'], ['Calibrate', 'Click both ends of a known length, then type it']]],
     ['While drawing a polygon', [['H', 'Next edge horizontal'], ['V', 'Next edge vertical'], ['A', '90° to the last edge (press again for an earlier edge)'], ['Alt+click', 'Use an edge of another markup for 90°'], ['Shift', 'Horizontal or vertical, whichever is closer'], ['F8', 'Keep horizontal / vertical on'], ['Ctrl', 'Hold to stop snapping'], ['Enter', 'Close the polygon'], ['Backspace', 'Remove the last corner'], ['Esc', 'Cancel']]],
     ['Rectangle', [['Click, click', 'First corner, then the opposite corner'], ['Drag', 'Corner to corner'], ['Type a number', 'Exact width and height after the first corner'], ['Tab', 'Switch between width and height'], ['Shift', 'Keep it square'], ['Ctrl', 'Hold to stop snapping to walls and lines']]],
     ['Eraser', [['Drag', 'Erase colour under the brush'], ['Shift+click', 'Remove a whole markup or coloured area'], ['[ and ]', 'Smaller / larger brush'], ['Right-click', 'Remove colour in this area of the drawing']]],
@@ -428,6 +493,6 @@ export function showHelp() {
     h('div', { class: 'help-grid' }, ...rows.map(([t, items]) => h('section', null,
       h('h3', null, t),
       h('dl', null, ...items.flatMap(([k, v]) => [h('dt', null, h('kbd', null, k)), h('dd', null, v)]))))),
-    h('p', { class: 'about' }, 'PlanTint 1.1. Built with Electron, MuPDF (AGPL), Clipper, UTIF, fflate, IBM Plex fonts (OFL) and Lucide icons (ISC). The full source is included with this copy.'));
+    h('p', { class: 'about' }, 'PlanTint 1.2. Built with Electron, MuPDF (AGPL), Clipper, UTIF, fflate, IBM Plex fonts (OFL) and Lucide icons (ISC). The full source is included with this copy.'));
   return modal({ title: 'Keys and mouse', body, wide: true, buttons: [{ label: 'Close', value: true, primary: true }] });
 }

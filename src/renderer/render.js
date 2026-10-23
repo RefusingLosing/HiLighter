@@ -9,6 +9,7 @@ import { rgba, borderColorOf } from './colors.js';
 import { drawLegend, legendRows, legendLayout } from './legend.js';
 import { dashFor } from '../shared/linestyle.js';
 import { lengthLabel } from './units.js';
+import { drawAnnots, drawDim, dimLayout, tagLayout, tagsVisible } from './annot.js';
 import * as engine from './engine.js';
 
 export const BOARD = '#5E6862';
@@ -107,6 +108,13 @@ export const T = {
   snap: null,            // { x, y, kind }
   busyAt: null,          // [devX, devY]
   cursor: null,          // [sheetX, sheetY]
+  dim: null,             // dimension being drawn: { a, cur, b, off, phase: 'b' | 'off' }
+  calibLine: null,       // calibration line being drawn: { a, cur, done }
+  dimEdit: null,         // a dimension being edited (moved end or line): the edited copy
+  tagEdit: null,         // an area tag being dragged: { id, at }
+  hoverDimId: null,
+  hoverTagId: null,
+  hoverDimHandle: null,  // 'a' | 'b' | 'off'
 };
 
 // ------------------------------------------------------------------ canvases + frame loop
@@ -275,6 +283,13 @@ export function drawScene(ctx, v, octx, isLoupe) {
     ctx.drawImage(octx.canvas, 0, 0);
     ctx.globalCompositeOperation = 'source-over';
   }
+  // dimensions and area tags: part of the sheet (they print)
+  if ((S.dims.length && S.meas.dims) || tagsVisible()) {
+    ctx.save();
+    ctx.setTransform(v.scale, 0, 0, v.scale, v.tx, v.ty);
+    drawAnnots(ctx, 1 / v.scale, { moveIds: T.moveIds, dx: T.moveDx, dy: T.moveDy, dimEdit: T.dimEdit, tagEdit: T.tagEdit });
+    ctx.restore();
+  }
   // gap lines (screen only, never exported)
   if (S.showGaps && (S.gaps.length || T.gap)) {
     ctx.save();
@@ -407,6 +422,40 @@ function dimLine(ctx, ax, ay, bx, by, text, d) {
   pill(ctx, text, (ax + bx) / 2, (ay + by) / 2, d);
 }
 
+/** Blue outline along a dimension's lines (hover and selection). */
+function outlineDim(ctx, v, d, color, width) {
+  const L = dimLayout(d);
+  const sp = (x, y) => [x * v.scale + v.tx, y * v.scale + v.ty];
+  ctx.save();
+  ctx.lineCap = 'round';
+  for (const [w, c] of [[width + 2.5, 'rgba(255,255,255,0.9)'], [width, color]]) {
+    ctx.lineWidth = w * v.dpr;
+    ctx.strokeStyle = c;
+    ctx.beginPath();
+    for (const sg of L.segs) { const [ax, ay] = sp(sg[0], sg[1]); const [bx, by] = sp(sg[2], sg[3]); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); }
+    ctx.stroke();
+  }
+  // the text box
+  const t = L.text;
+  ctx.translate(t.cx * v.scale + v.tx, t.cy * v.scale + v.ty);
+  ctx.rotate(t.ang);
+  ctx.setLineDash([3 * v.dpr, 2 * v.dpr]);
+  ctx.lineWidth = 1 * v.dpr;
+  ctx.strokeStyle = color;
+  ctx.strokeRect((-t.w / 2) * v.scale - 2 * v.dpr, (-t.h / 2) * v.scale - 1 * v.dpr, t.w * v.scale + 4 * v.dpr, t.h * v.scale + 2 * v.dpr);
+  ctx.restore();
+}
+
+function outlineTag(ctx, v, t, dx = 0, dy = 0, color = BLUE) {
+  const x0 = (t.cx - t.w / 2 + dx) * v.scale + v.tx, y0 = (t.cy - t.h / 2 + dy) * v.scale + v.ty;
+  ctx.save();
+  ctx.setLineDash([4 * v.dpr, 3 * v.dpr]);
+  ctx.lineWidth = 1.25 * v.dpr;
+  ctx.strokeStyle = color;
+  ctx.strokeRect(x0 - 3 * v.dpr, y0 - 3 * v.dpr, t.w * v.scale + 6 * v.dpr, t.h * v.scale + 6 * v.dpr);
+  ctx.restore();
+}
+
 export function editableRings(m) {
   if (T.vertexEdit && T.vertexEdit.id === m.id) return T.vertexEdit.rings;
   return m.rings;
@@ -463,6 +512,7 @@ function drawRectInProgress(ctx, v, d) {
 export function drawUI(ctx, v, isLoupe) {
   if (!S.doc) return;
   const d = v.dpr;
+  const d_ = v.dpr;
   const sp = (x, y) => [x * v.scale + v.tx, y * v.scale + v.ty];
 
   if (T.hoverId && !S.selection.has(T.hoverId) && !T.moveIds) {
@@ -488,6 +538,49 @@ export function drawUI(ctx, v, isLoupe) {
     else strokeOutline(ctx, v, path, dx, dy);
   }
   if (brackets.length) strokeBrackets(ctx, v, brackets);
+  // area tags of selected (or hovered) markups: dashed box, so it is clear they can be dragged
+  if (tagsVisible()) {
+    S.markups.forEach((m, i) => {
+      const sel_ = S.selection.has(m.id), hov = T.hoverTagId === m.id;
+      if (!sel_ && !hov) return;
+      const t = tagLayout(i);
+      if (!t) return;
+      let dx = 0, dy = 0;
+      if (T.moveIds && T.moveIds.has(m.id)) { dx = T.moveDx; dy = T.moveDy; }
+      if (T.tagEdit && T.tagEdit.id === m.id) { dx = T.tagEdit.at[0] - t.cx; dy = T.tagEdit.at[1] - t.cy; }
+      outlineTag(ctx, v, t, dx, dy, sel_ ? BLUE : 'rgba(36,87,197,0.6)');
+    });
+  }
+  // dimensions: hover and selection
+  if (S.meas.dims && S.dims.length) {
+    const selD = S.dims.filter((d) => S.selection.has(d.id));
+    if (T.hoverDimId && !S.selection.has(T.hoverDimId) && !T.moveIds) {
+      const d = S.dims.find((q) => q.id === T.hoverDimId);
+      if (d) outlineDim(ctx, v, d, 'rgba(36,87,197,0.55)', 1.25);
+    }
+    for (const d0 of selD) {
+      let d = d0;
+      if (T.dimEdit && T.dimEdit.id === d.id) d = T.dimEdit;
+      else if (T.moveIds && T.moveIds.has(d.id)) d = { ...d, a: [d.a[0] + T.moveDx, d.a[1] + T.moveDy], b: [d.b[0] + T.moveDx, d.b[1] + T.moveDy] };
+      outlineDim(ctx, v, d, BLUE, 1.5);
+      if (selD.length === 1 && !T.moveIds) {
+        const L = dimLayout(d);
+        const mid = [(L.p[0] + L.q[0]) / 2, (L.p[1] + L.q[1]) / 2];
+        for (const [which, pt] of [['a', d.a], ['b', d.b]]) {
+          const [x, y] = sp(pt[0], pt[1]);
+          const hot = T.hoverDimHandle === which;
+          handle(ctx, x, y, d_, hot ? BLUE : '#FFFFFF', BLUE, hot ? 9 : 7);
+        }
+        const [mx, my] = sp(mid[0], mid[1]);
+        ctx.save();
+        ctx.fillStyle = T.hoverDimHandle === 'off' ? BLUE : '#FFFFFF';
+        ctx.strokeStyle = BLUE;
+        ctx.lineWidth = 1.5 * d_;
+        ctx.beginPath(); ctx.arc(mx, my, (T.hoverDimHandle === 'off' ? 6 : 5) * d_, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.restore();
+      }
+    }
+  }
   if (sel.length === 1 && !T.moveIds) {
     const m = sel[0];
     const rings = editableRings(m);
@@ -601,6 +694,38 @@ export function drawUI(ctx, v, isLoupe) {
     ctx.restore();
   }
   if (T.rect) drawRectInProgress(ctx, v, d);
+  if (T.dim) {
+    const t = T.dim;
+    const end = t.phase === 'b' ? t.cur : t.b;
+    if (end && Math.hypot(end[0] - t.a[0], end[1] - t.a[1]) > 0.5) {
+      ctx.save();
+      ctx.setTransform(v.scale, 0, 0, v.scale, v.tx, v.ty);
+      drawDim(ctx, { id: '_', a: t.a, b: end, off: t.phase === 'off' ? t.off : 0 }, 1 / v.scale);
+      ctx.restore();
+    }
+    for (const pt of [t.a, t.b].filter(Boolean)) { const [x, y] = sp(pt[0], pt[1]); handle(ctx, x, y, d, '#FFFFFF', BLUE, 7); }
+  }
+  if (T.calibLine) {
+    const t = T.calibLine;
+    const [ax, ay] = sp(t.a[0], t.a[1]), [bx, by] = sp(t.cur[0], t.cur[1]);
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+    ctx.lineWidth = 4.5 * d;
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+    ctx.strokeStyle = SNAP;
+    ctx.lineWidth = 2 * d;
+    ctx.stroke();
+    ctx.restore();
+    handle(ctx, ax, ay, d, '#FFFFFF', SNAP, 8);
+    handle(ctx, bx, by, d, '#FFFFFF', SNAP, 8);
+    const len = Math.hypot(t.cur[0] - t.a[0], t.cur[1] - t.a[1]);
+    const L = Math.hypot(bx - ax, by - ay);
+    if (L > 30 * d && !isLoupe) {
+      const nx = -(by - ay) / L, ny = (bx - ax) / L;
+      pill(ctx, lengthLabel(len), (ax + bx) / 2 + nx * 18 * d, (ay + by) / 2 + ny * 18 * d, d, SNAP);
+    }
+  }
   if (T.gap && T.gap.pts.length) {
     const pts = T.gap.cursor ? [...T.gap.pts, ...T.gap.cursor] : T.gap.pts;
     ctx.save();

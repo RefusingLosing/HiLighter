@@ -1,7 +1,7 @@
 // Opening drawings and projects, saving, exporting, the exit question and crash recovery.
 
 import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate';
-import { S, emit, on, ptToPx } from './state.js';
+import { S, emit, on, ptToPx, loadMeasPrefs, MEAS_DEFAULT } from './state.js';
 import * as engine from './engine.js';
 import { resetTiles, requestAll, geo } from './render.js';
 import { fit } from './view.js';
@@ -11,8 +11,10 @@ import { pickPage, sheetName, chooseSaveType, SAVE_TYPES } from './dialogs.js';
 import { legendPng, clampLegendSizes } from './legend.js';
 import { hexToRgb, borderColorOf } from './colors.js';
 import { isLineStyle } from '../shared/linestyle.js';
-import { detectScale } from './units.js';
+import { detectScale, scaleRatio, scaleSource, hasScale, isLengthUnit, isAreaUnit } from './units.js';
 import * as G from './geom.js';
+import { annotExport } from './annot.js';
+import { scheduleXlsx, scheduleCsv } from './schedule.js';
 
 const IMG_EXT = ['png', 'jpg', 'jpeg', 'tif', 'tiff', 'bmp', 'gif', 'webp'];
 const MAX_IMAGE_PX = 100e6;
@@ -84,8 +86,11 @@ function setDoc(doc) {
   S.doc = doc;
   S.markups = [];
   S.gaps = [];
+  S.dims = [];
   S.legend = null;
   S.rasterOps = [];
+  S.calib = null;
+  S.meas = loadMeasPrefs();
   S.selection = new Set();
   S.legendSelected = false;
   resetHistory();
@@ -183,19 +188,25 @@ async function buildProject() {
       return { x0: p.x0, y0: p.y0, w: p.w, h: p.h, colors: p.colors, file };
     }),
   }));
+  const src = scaleSource();
   const meta = {
-    format: 'plantint', version: 2, app: 'PlanTint 1.1', saved: new Date().toISOString(),
+    format: 'plantint', version: 3, app: 'PlanTint 1.2', saved: new Date().toISOString(),
     source: {
       name: d.name, kind: d.kind, ext: d.ext, file: srcName, pageIndex: d.pageIndex, pageCount: d.pageCount,
       dpi: d.dpi, W: d.W, H: d.H, pageSizePt: d.pageSizePt, physical: d.physical,
     },
-    scale: d.scale || 0, scaleSource: d.scaleSource || '',
+    // the scale as PlanTint 1.1 reads it; 1.2 uses calib below
+    scale: src === 'none' ? 0 : Math.round(scaleRatio() * 100) / 100, scaleSource: src === 'title' ? 'title' : src === 'none' ? '' : 'user',
+    calib: S.calib ? { ...S.calib } : null,
+    meas: { ...S.meas },
     markups: S.markups.map((m) => ({
       id: m.id, name: m.name, kind: m.kind, color: m.color, opacity: m.opacity,
       borderPt: m.borderPt, borderColor: m.borderColor, borderStyle: m.borderStyle || 'solid',
       rings: m.rings.map((r) => r.map(round2)),
+      ...(m.tagAt ? { tagAt: m.tagAt.map(round2) } : {}),
     })),
     gaps: S.gaps.map((g) => ({ id: g.id, pts: g.pts.map(round2) })),
+    dims: S.dims.map((q) => ({ id: q.id, a: q.a.map(round2), b: q.b.map(round2), off: round2(q.off || 0) })),
     legend: S.legend,
     style: S.style,
     fill: S.fill,
@@ -238,21 +249,40 @@ async function openProject(bytes, path, name, restored = false) {
       }
     }
     S.rasterOps = ops;
+    const fixPt = (p) => [p[0] * sx, p[1] * sy];
     S.markups = (meta.markups || []).map((m) => Object.freeze({
       id: m.id, name: m.name, kind: m.kind || 'fill', color: m.color, opacity: m.opacity,
       borderPt: m.borderPt || 0, borderColor: m.borderColor || null, borderStyle: isLineStyle(m.borderStyle) ? m.borderStyle : 'solid',
       rings: fixRings(m.rings),
+      ...(Array.isArray(m.tagAt) && m.tagAt.length === 2 ? { tagAt: fixPt(m.tagAt) } : {}),
     }));
     S.gaps = (meta.gaps || []).map((g) => Object.freeze({ id: g.id, pts: fixRings([g.pts])[0] }));
+    S.dims = (meta.dims || []).filter((q) => Array.isArray(q.a) && Array.isArray(q.b)).map((q) => Object.freeze({
+      id: String(q.id || '').startsWith('d') ? q.id : 'd' + Math.random().toString(36).slice(2, 10), a: fixPt(q.a), b: fixPt(q.b), off: (+q.off || 0) * sx,
+    }));
+    if (meta.meas && typeof meta.meas === 'object') {
+      const mm = { ...MEAS_DEFAULT, ...meta.meas };
+      if (!isLengthUnit(mm.len)) mm.len = MEAS_DEFAULT.len;
+      if (!isAreaUnit(mm.area)) mm.area = MEAS_DEFAULT.area;
+      S.meas = Object.freeze(mm);
+    }
     if (S.gaps.length) await engine.call('setGaps', { lines: S.gaps.map((g) => g.pts) });
     S.legend = meta.legend ? Object.freeze(clampLegendSizes(meta.legend)) : null;
     if (meta.style) S.style = { ...S.style, ...meta.style, borderStyle: isLineStyle(meta.style.borderStyle) ? meta.style.borderStyle : 'solid' };
     if (meta.fill) S.fill = { ...S.fill, ...meta.fill };
-    if (typeof meta.scale === 'number') { d.scale = meta.scale; d.scaleSource = meta.scaleSource || (meta.scale ? 'user' : ''); }
+    if (meta.version >= 3 && 'calib' in meta) {
+      const c = meta.calib;
+      S.calib = c && typeof c === 'object' && c.mPerPx >= 0 ? Object.freeze({ ...c, mPerPx: c.mPerPx / sx, ...(c.a ? { a: fixPt(c.a), b: fixPt(c.b) } : {}) }) : null;
+    } else if (typeof meta.scale === 'number') {
+      // projects from 1.0 and 1.1: a typed scale, or no scale where the title block had one
+      if (meta.scaleSource === 'user' && meta.scale > 0 && meta.scale !== d.scale) S.calib = Object.freeze({ kind: 'typed', mPerPx: (meta.scale * 0.0254) / d.dpi, ratio: meta.scale });
+      else if (!meta.scale && d.scale) S.calib = Object.freeze({ kind: 'none', mPerPx: 0 });
+    }
     d.projectPath = restored ? null : path;
     d.projectName = restored ? null : name;
     resetHistory();
     if (restored) markUnsaved(); else markSaved(true);
+    emit('scale');
     emit('style');
     emit('doc');
     emit('docLoaded');
@@ -279,7 +309,8 @@ function exportMarkups() {
 
 async function exportImage(type) {
   const legend = await legendPng(1);
-  return engine.call('exportImage', { type, quality: 0.92, markups: exportMarkups(), legend }, { onProgress: (f, msg) => busy.update(msg, f) });
+  const annots = await annotExport(1);
+  return engine.call('exportImage', { type, quality: 0.92, markups: exportMarkups(), legend, annots }, { onProgress: (f, msg) => busy.update(msg, f) });
 }
 
 async function exportPdf(flat) {
@@ -295,8 +326,9 @@ async function exportPdf(flat) {
     }
   }
   const legend = await legendPng(flat ? 1 : 2);
+  const annots = await annotExport(flat ? 1 : 3);
   const d = S.doc;
-  return engine.call('exportPdf', { mode: flat ? 'flat' : 'vector', markups: ms, legend, title: baseName(d.projectName || d.name) }, { onProgress: (f, msg) => busy.update(msg, f) });
+  return engine.call('exportPdf', { mode: flat ? 'flat' : 'vector', markups: ms, legend, annots, title: baseName(d.projectName || d.name) }, { onProgress: (f, msg) => busy.update(msg, f) });
 }
 
 // ------------------------------------------------------------------ saving
@@ -306,19 +338,23 @@ let saving = false;
 async function saveTo(path, type) {
   if (saving) return false;
   saving = true;
-  const label = { plantint: 'project', png: 'PNG picture', jpg: 'JPEG picture', pdf: 'PDF', pdfflat: 'flattened PDF' }[type];
+  const label = { plantint: 'project', png: 'PNG picture', jpg: 'JPEG picture', pdf: 'PDF', pdfflat: 'flattened PDF', xlsx: 'schedule', csv: 'schedule' }[type];
+  const isSchedule = type === 'xlsx' || type === 'csv';
   busy.show(`Saving the ${label}`, null);
   try {
     let bytes;
     if (type === 'plantint') bytes = await buildProject();
     else if (type === 'png' || type === 'jpg') bytes = await exportImage(type);
     else if (type === 'pdf' || type === 'pdfflat') bytes = await exportPdf(type === 'pdfflat');
+    else if (type === 'xlsx') bytes = scheduleXlsx();
+    else if (type === 'csv') bytes = scheduleCsv();
     else throw new Error('Unknown file type.');
     busy.update('Writing the file', 0.98);
     await window.plantint.writeFile(path, bytes);
     const fname = path.split(/[\\/]/).pop();
     if (type === 'plantint') { S.doc.projectPath = path; S.doc.projectName = fname; }
-    markSaved(type === 'plantint');
+    // a schedule is a list of numbers, not the marking: it does not count as saving the work
+    if (!isSchedule) markSaved(type === 'plantint');
     S.doc.lastSave = { path, type };
     toast(`Saved ${fname}`, { action: 'Show in folder', onAction: () => window.plantint.showInFolder(path), timeout: 5000 });
     if (type === 'plantint') window.plantint.recoveryClear();
@@ -334,16 +370,21 @@ async function saveTo(path, type) {
   }
 }
 
-/** Asks which kind of file, then where to save it. */
-export async function saveAs(presetType) {
+/** Asks which kind of file, then where to save it. keepWork: asked before closing (no schedules). */
+export async function saveAs(presetType, keepWork = false) {
   if (!S.doc) return false;
-  const type = presetType || (await chooseSaveType());
+  const type = presetType || (await chooseSaveType(undefined, keepWork));
   if (!type) return false;
+  if ((type === 'xlsx' || type === 'csv') && !hasScale()) {
+    toast('A schedule needs the drawing’s scale. Calibrate from a known length (C) or type the scale, then save again.', { timeout: 7000 });
+    return false;
+  }
   const t = SAVE_TYPES.find((q) => q.id === type);
   const d = S.doc;
   const dir = d.projectPath ? d.projectPath.replace(/[^\\/]*$/, '') : (d.path ? d.path.replace(/[^\\/]*$/, '') : '');
   let base = baseName(d.projectName || d.name) + (d.pageCount > 1 && !d.projectName ? ` - page ${d.pageIndex + 1}` : '');
   if (type === 'pdfflat') base += ' - flattened';
+  if (type === 'xlsx' || type === 'csv') base += ' - schedule';
   const r = await window.plantint.saveDialog({ title: 'Save ' + t.title, defaultPath: dir + base + '.' + t.ext, type });
   if (!r) return false;
   return saveTo(r.path, type);
@@ -375,7 +416,8 @@ async function askSave(action) {
 export async function confirmDiscard(action) {
   if (!S.doc || saveState() === 'saved') return true;
   const c = await askSave(action);
-  if (c === 'save') return saveAs();
+  // a schedule alone does not keep the marking, so it does not count as saving here
+  if (c === 'save') return (await saveAs(null, true)) && saveState() !== 'unsaved';
   return c === 'discard';
 }
 
@@ -393,7 +435,7 @@ export function initCloseFlow() {
       }
       const c = await askSave('closing');
       if (c === 'discard') { await window.plantint.recoveryClear(); window.plantint.quit(); }
-      else if (c === 'save') { if (await saveAs()) { await window.plantint.recoveryClear(); window.plantint.quit(); } }
+      else if (c === 'save') { if ((await saveAs(null, true)) && saveState() !== 'unsaved') { await window.plantint.recoveryClear(); window.plantint.quit(); } }
     } finally {
       closing = false;
     }

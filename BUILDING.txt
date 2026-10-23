@@ -15,10 +15,14 @@ LAYOUT
                      close/save handshake and crash-recovery copies (main.js, preload.js)
   src/renderer/      the interface: tools (tools.js), drawing of the sheet and markups
                      (render.js), side panel (panel.js), dialogs and the painted-colour
-                     finder panel (dialogs.js), open/save/export (io.js), undo (history.js)
+                     finder panel (dialogs.js), open/save/export (io.js), undo (history.js);
+                     measuring: scale and units (units.js, scale.js), visible areas and
+                     perimeters (measure.js), dimensions and area tags (annot.js),
+                     Excel and CSV schedules (schedule.js)
   src/engine/        a Web Worker that owns the drawing's pixels: renders PDFs with MuPDF,
                      decodes pictures, fill, painted-colour search (detect.js), colour
-                     removal (imgproc.js unpaint), and every export (PNG, JPEG, PDF)
+                     removal (imgproc.js unpaint), snapping (a PDF's own line geometry,
+                     else the edges of the ink), and every export (PNG, JPEG, PDF)
   src/shared/        code used by both: border line styles (linestyle.js)
   assets/            icons (tools/make_icons.py draws them)
   build.mjs          esbuild bundling, icon set, fonts, MuPDF files
@@ -33,14 +37,20 @@ TESTS
                      exports with its PNG export; check_layers.py checks layer settings)
     test/e2e/        drives the built app with Playwright: t0 is the 1.0 behaviour, t1 to
                      t5 are the five 1.1 fixes (PDF export, rectangle guides, line styles,
-                     painted colour, eraser)
-  Set PLANTINT_TEST_OUT to choose where results go (default: the system temp folder).
+                     painted colour, eraser), t6 is measuring (1.2)
+    test/unit/       Node tests of units, typing lengths, visible areas and schedules
+                     (check_annots.py checks dimensions and tags in exported PDFs)
+  Set PLANTINT_TEST_OUT to choose where results go (default: the system temp folder), and
+  PLANTINT_NO_BUILD=1 to test the build already in dist/app (for example the minified one
+  that npm run dist packages: node build.mjs --minify first).
 
 FILE FORMAT
   A .plantint project is a zip: project.json (markups, legend, style, scale and the
   colour-removal steps), the original drawing under source/, and one run-length mask per
   colour-removal step under ops/. Version 2 adds border line styles, the drawing scale
-  and several paint colours per removal step; version 1 files open unchanged.
+  and several paint colours per removal step. Version 3 adds the calibration (calib),
+  measuring settings (meas), dimensions (dims) and dragged tag positions (tagAt); it still
+  writes scale/scaleSource so 1.1 reads the scale. Version 1 and 2 files open unchanged.
 
 LICENCE
   AGPL-3.0-or-later (because of MuPDF). See the licences in README.txt.

@@ -1,18 +1,66 @@
-PlanTint 1.1
-Highlighting for architectural and technical drawings.
+PlanTint 1.2
+Highlighting and measuring for architectural and technical drawings.
 
 INSTALL
-  PlanTint-Setup-1.1.0.exe
+  PlanTint-Setup-1.2.0.exe
       Installs for your Windows user only (no admin rights needed), adds Start menu and
       desktop shortcuts, and opens .plantint project files when you double-click them.
-      Recommended. Installing over 1.0 keeps your settings.
+      Recommended. Installing over 1.0 or 1.1 keeps your settings.
 
-  PlanTint-1.1.0-portable.exe
+  PlanTint-1.2.0-portable.exe
       One file, nothing installed. It unpacks itself each time, so it starts a few
       seconds slower than the installed version.
 
   The program is not code-signed, so Windows may show "Windows protected your PC".
   Click "More info", then "Run anyway".
+
+WHAT'S NEW IN 1.2: MEASURING
+  Everything below is optional; turn each part on or off under Measurements in the side
+  panel. Every change there can be undone, and it is saved with the project.
+
+  1. The scale.
+     PlanTint reads the scale from the title block ("1:50"). When a print is not at its
+     stated scale, or the drawing is a scan or photo, use Calibrate (C): click both ends
+     of a length you know (an overall dimension, a grid spacing, a door) and type its real
+     length, in any unit ("12", "12600 mm", "39'4 1/2""). The dialog shows the resulting
+     scale and warns when it disagrees with the title block. You can also type a scale in
+     the bar at the bottom while drawing, or press Reset to go back to the title block.
+     Use the longest length you know: the result is more accurate.
+
+  2. Units.
+     Lengths in mm, cm, m, km, inches, feet, feet and inches, or yards; areas in mm², cm²,
+     m², hectares, km², in², ft², yd² or acres; decimals automatic or 0 to 3 (with feet and
+     inches: rounding to 1", 1/2", 1/4", 1/8" or 1/16"). Rectangle sizes are typed in the
+     same unit (14'6" works too). Calibrating in feet switches to feet; in metres, to metres.
+
+  3. Areas and perimeters.
+     Tick Area and/or Perimeter: each markup in the list shows its values, the list
+     header shows the total and the panel the total of the selection. Only what is visible
+     counts: the part of a markup that is erased or covered by a markup above it is left
+     out, so the total equals the area coloured on the sheet.
+     - Tags: writes the values inside each markup on the sheet. A tag sits at the most
+       open spot, clear of the drawing's own text; drag it to move it (right-click the
+       markup to put it back). Tags print.
+     - Legend: adds Area and Perimeter columns to the legend, with a total row (merged
+       rows are added up).
+
+  4. Dimensions (K).
+     Click two points, then click where the dimension line goes (or press Enter to keep
+     it on the points). Points snap to walls and lines; Shift keeps it horizontal or
+     vertical; hold Ctrl to place freely. On PDF drawings snapping uses the drawing's own
+     geometry, so a dimension between two wall faces reads exactly what was drawn. With
+     Select: drag an end to re-measure, the round dot to move the line, the dimension to
+     move it; Delete removes it; the eraser removes those it passes over. Text size and
+     colour are set under Measurements. Dimensions print.
+
+  5. Schedules.
+     Measurements > Schedule… (or Save as) writes every markup with its area and
+     perimeter, totals by colour and the dimensions, as an Excel workbook (.xlsx, with
+     the colour in each row and live SUM formulas) or a CSV file. A schedule needs a scale.
+
+  Accuracy: a measurement is as good as the scale and the outline. A filled area follows
+  the drawn lines to within a fraction of a millimetre on the sheet; polygons, rectangles
+  and dimensions are exact. Good for quantities and checks, not for certified surveys.
 
 WHAT'S NEW IN 1.1
   1. PDF export: highlights now show in every PDF reader.
@@ -68,8 +116,11 @@ FIRST STEPS
      PDFs and multi-page TIFFs ask which page to open.
   2. Fill rooms with F (one click per room), or draw polygons (P) and rectangles (R).
      Each markup gets a name from the room label inside it when the PDF has text.
-  3. Press L to place the legend, then Ctrl+S to save. Save asks for the kind of file
-     (PlanTint project, PDF, flattened PDF, PNG or JPEG) and then where to put it.
+  3. Check the scale under Measurements (Calibrate with C if needed) and tick what to
+     measure. Add dimensions with K.
+  4. Press L to place the legend, then Ctrl+S to save. Save asks for the kind of file
+     (PlanTint project, PDF, flattened PDF, PNG, JPEG, or an Excel or CSV schedule) and
+     then where to put it.
   Press F1 inside PlanTint to see every key.
 
 GOOD TO KNOW
@@ -79,10 +130,10 @@ GOOD TO KNOW
   - If a fill would spill over most of the sheet, PlanTint asks before filling.
   - Pictures saved from PlanTint keep the drawing's resolution and print size.
   - Unsaved work is copied every 90 seconds and offered back after a crash.
-  - Projects saved by 1.0 open in 1.1.
+  - Projects saved by 1.0 and 1.1 open in 1.2 (a scale typed in 1.1 is kept).
 
 LICENCES
   PlanTint uses Electron (MIT), MuPDF (AGPL-3.0), Clipper (Boost), UTIF (MIT),
   fflate (MIT), IBM Plex fonts (SIL OFL) and Lucide icons (ISC).
   Because MuPDF is AGPL, the complete source of this program is included in
-  PlanTint-1.1.0-source.zip.
+  PlanTint-1.2.0-source.zip.

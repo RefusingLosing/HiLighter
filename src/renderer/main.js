@@ -1,6 +1,6 @@
 // PlanTint renderer entry: builds the interface and wires the modules together.
 
-import { S, on, emit, setSelection } from './state.js';
+import { S, on, emit, setSelection, loadMeasPrefs } from './state.js';
 import * as engine from './engine.js';
 import { V, fit, zoomAt, setZoomPercent, zoomPercent } from './view.js';
 import { initRender, resize, requestAll, requestUI, setLoupeVisible, T, scheduleSharp } from './render.js';
@@ -10,8 +10,12 @@ import { h, icon, initTooltips, showMenu, toast, modalOpen, seg } from './ui.js'
 import { undo, redo, canUndo, canRedo, undoLabel, redoLabel, change } from './history.js';
 import { initIO, openFromDialog, openFile, save, saveAs, initCloseFlow, startRecovery, offerRecovery, isLoading, confirmDiscard, writeRecovery } from './io.js';
 import { detectColours, detectActive, detectApi, showHelp } from './dialogs.js';
-import { defaultLegend, legendRect } from './legend.js';
-import { lengthUnit } from './units.js';
+import { defaultLegend, legendRect, legendLayout, legendRows } from './legend.js';
+import { lengthUnitLabel, scaleSource, fmtScale, hasScale, scaleRatio } from './units.js';
+import { setTypedScale, resetScale } from './scale.js';
+import * as measure from './measure.js';
+import * as annot from './annot.js';
+import * as units from './units.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -140,7 +144,7 @@ function buildTopbar() {
 
 function buildRail() {
   const rail = $('rail');
-  const groups = [['select', 'hand'], ['fill', 'polygon', 'rect', 'gap'], ['pick', 'erase']];
+  const groups = [['select', 'hand'], ['fill', 'polygon', 'rect', 'gap'], ['dim', 'calib'], ['pick', 'erase']];
   const btns = {};
   groups.forEach((g, gi) => {
     if (gi) rail.append(h('div', { class: 'rail-sep' }));
@@ -169,21 +173,40 @@ function buildRail() {
 
 // ------------------------------------------------------------------ status bar + tool options
 
+/** The drawing scale in the status bar: typed 1:n (sheets with a print size) or the calibration. */
 function scaleControl() {
   const d = S.doc;
-  if (!d.physical) return h('span', { class: 'opt-note muted', 'data-tip': 'This picture has no print size, so sizes are in pixels', 'data-tip-side': 'top' }, 'Sizes in pixels');
-  const input = h('input', { class: 'scale-in', type: 'text', inputmode: 'numeric', value: d.scale ? String(d.scale) : '', placeholder: 'paper', 'aria-label': 'Drawing scale', spellcheck: 'false' });
+  const src = scaleSource();
+  const unit = h('span', { class: 'val unit' }, lengthUnitLabel());
+  if (!d.physical) {
+    // a picture with no print size: only a calibration gives real sizes
+    if (src === 'calib') {
+      return h('span', { class: 'opt', 'data-tip': 'Calibrated from a known length. Calibrate again (C) to change it.', 'data-tip-side': 'top' }, h('span', { class: 'opt-note' }, 'Calibrated: ' + fmtScale()), unit);
+    }
+    return h('span', { class: 'opt' }, h('span', { class: 'opt-note muted', 'data-tip': 'This picture has no print size. Calibrate from a known length to measure real sizes.', 'data-tip-side': 'top' }, 'Sizes in pixels'),
+      h('button', { class: 'btn small', 'data-tip': 'Click both ends of a length you know, then type it', 'data-key': 'C', 'data-tip-side': 'top', onclick: () => setTool('calib') }, 'Calibrate'));
+  }
+  const n = scaleRatio();
+  const shown = n > 0 ? (Math.abs(n - Math.round(n)) < 0.05 ? String(Math.round(n)) : n.toFixed(1)) : '';
+  const input = h('input', { class: 'scale-in', type: 'text', inputmode: 'numeric', value: shown, placeholder: 'paper', 'aria-label': 'Drawing scale', spellcheck: 'false' });
   input.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter' || e.key === 'Escape') input.blur(); });
   input.addEventListener('change', () => {
-    const v = parseFloat(String(input.value).replace(/^1\s*[:\/]\s*/, '').replace(',', '.'));
-    d.scale = v > 0 && v <= 100000 ? v : 0;
-    d.scaleSource = d.scale ? 'user' : '';
-    emit('scale');
-    requestUI();
+    const t = String(input.value).trim();
+    const v = parseFloat(t.replace(/^1\s*[:\/]\s*/, '').replace(',', '.'));
+    if (!t) setTypedScale(0);
+    else if (v > 0 && v <= 100000) { if (Math.abs(v - scaleRatio()) > 1e-6) setTypedScale(v); }
+    else { toast('Type a scale such as 50 for 1:50.'); input.value = shown; }
+    requestAll();
   });
-  const tip = d.scale && d.scaleSource === 'title' ? `Read from the title block. Sizes show in metres at 1:${d.scale}; clear it for millimetres on paper.` : 'Drawing scale for the sizes shown while drawing. Leave empty for millimetres on paper.';
-  return h('label', { class: 'opt', 'data-tip': tip, 'data-tip-side': 'top' }, h('span', null, 'Scale 1:'), input,
-    h('span', { class: 'val unit' }, lengthUnit()));
+  const tips = {
+    title: `Read from the title block (1:${d.scale}). Type another scale, calibrate from a known length (C), or clear it for millimetres on the sheet.`,
+    typed: 'The scale you typed. Calibrate from a known length (C) if the print may be scaled.',
+    calib: S.calib && S.calib.lengthM ? `Calibrated from a known length (${fmtScale()}). Type a scale to replace it.` : 'Calibrated from a known length.',
+    none: 'No scale: sizes are millimetres on the sheet. Type the scale (for example 50) or calibrate from a known length (C).',
+  };
+  const label = h('label', { class: 'opt', 'data-tip': tips[src], 'data-tip-side': 'top' }, h('span', null, src === 'calib' ? 'Calibrated 1:' : 'Scale 1:'), input, unit);
+  if (src === 'title' || src === 'none') return label;
+  return h('span', { class: 'opt' }, label, h('button', { class: 'link-btn', 'data-tip': d.scale ? `Back to the title block scale (1:${d.scale})` : 'Back to sizes on the sheet', 'data-tip-side': 'top', onclick: () => { resetScale(); requestAll(); } }, 'Reset'));
 }
 
 function buildStatus() {
@@ -191,6 +214,8 @@ function buildStatus() {
   const render = () => {
     let text = S.doc ? hintFor(S.tool) : 'Open a PDF or a picture of a drawing to start.';
     if (S.doc && S.tool === 'rect' && rectWaiting()) text = 'Move to the opposite corner and click, or type the width (Tab for the height, Enter to finish). Esc cancels.';
+    if (S.doc && S.tool === 'dim' && T.dim) text = T.dim.phase === 'b' ? 'Click the second point. Shift keeps it horizontal or vertical; Ctrl places it freely.' : 'Move to where the dimension line goes and click (Enter keeps it on the points). Backspace goes back.';
+    if (S.doc && S.tool === 'calib' && T.calibLine) text = 'Click the other end of the length you know.';
     if (detectActive()) text = 'Painted colour: click outlined areas to leave them out or add them back. Esc closes.';
     hint.textContent = text;
     hint.title = text;
@@ -216,6 +241,11 @@ function buildStatus() {
       if (S.lock.mode === 'perp') opts.append(h('span', { class: 'opt-note' }, S.lock.extRef ? 'Following a picked edge' : (S.lock.refIdx >= 0 ? `Following edge ${S.lock.refIdx + 1}` : 'Following the last edge')));
       opts.append(snapToggle(), scaleControl());
     } else if (t === 'rect') {
+      opts.append(snapToggle(), scaleControl());
+    } else if (t === 'dim') {
+      opts.append(snapToggle(), scaleControl());
+      if (!S.meas.dims) opts.append(h('span', { class: 'opt-note' }, 'Dimensions are hidden; a new one shows them again'));
+    } else if (t === 'calib') {
       opts.append(snapToggle(), scaleControl());
     } else if (t === 'gap') {
       opts.append(
@@ -244,16 +274,18 @@ function buildStatus() {
       const mmw = Math.round((d.pageSizePt[0] / 72) * 25.4), mmh = Math.round((d.pageSizePt[1] / 72) * 25.4);
       info.append(h('span', { class: 'pill', 'data-tip': 'Sheet size', 'data-tip-side': 'bottom' }, `${d.sheet ? d.sheet + ' ' : ''}${mmw} × ${mmh} mm`));
       info.append(h('span', { class: 'pill', 'data-tip': `Opened at ${d.dpi} dpi (${d.W} × ${d.H} pixels)`, 'data-tip-side': 'bottom' }, `${d.dpi} dpi`));
-      if (d.scale) info.append(h('span', { class: 'pill', 'data-tip': d.scaleSource === 'title' ? 'Scale read from the title block' : 'Scale you set', 'data-tip-side': 'bottom' }, `1:${d.scale}`));
+      const src = scaleSource();
+      if (src !== 'none') info.append(h('span', { class: 'pill', 'data-tip': { title: 'Scale read from the title block', typed: 'Scale you typed', calib: 'Scale calibrated from a known length' }[src], 'data-tip-side': 'bottom' }, fmtScale()));
     } else {
       info.append(h('span', { class: 'pill', 'data-tip': 'Picture size', 'data-tip-side': 'bottom' }, `${d.W} × ${d.H} px`));
       info.append(h('span', { class: 'pill', 'data-tip': d.physical ? 'Resolution stored in the picture' : 'The picture has no resolution; sizes assume 150 dpi', 'data-tip-side': 'bottom' }, d.physical ? `${d.dpi} dpi` : '150 dpi assumed'));
+      if (hasScale()) info.append(h('span', { class: 'pill', 'data-tip': 'Scale calibrated from a known length', 'data-tip-side': 'bottom' }, fmtScale()));
     }
   };
   const snapToggle = () => h('label', { class: 'check', 'data-tip': 'Corners snap to the faces of walls and lines in the drawing. Hold Ctrl to place freely.', 'data-tip-side': 'top' },
     h('input', { type: 'checkbox', checked: S.snapDrawing, onchange: (e) => { S.snapDrawing = e.target.checked; } }), h('span', null, 'Snap to lines'));
-  ['tool', 'lock', 'loupe', 'docLoaded', 'selection', 'rect', 'scale'].forEach((e) => on(e, render));
-  on('doc', () => { if (S.tool === 'gap') render(); });
+  ['tool', 'lock', 'loupe', 'docLoaded', 'selection', 'rect', 'scale', 'dimstep'].forEach((e) => on(e, render));
+  on('doc', () => { if (S.tool === 'gap' || S.tool === 'dim' || S.tool === 'calib' || S.tool === 'polygon' || S.tool === 'rect') render(); });
   render();
 }
 
@@ -272,6 +304,7 @@ function buildEmpty() {
     h('ol', { class: 'steps' },
       h('li', null, h('strong', null, 'Open'), ' a PDF, PNG, JPEG or TIFF. Multi-page files ask which page.'),
       h('li', null, h('strong', null, 'Fill'), ' rooms with one click, or draw polygons and rectangles. Each one gets a name.'),
+      h('li', null, h('strong', null, 'Measure'), ' areas, perimeters and dimensions (K) at the drawing’s scale, or calibrate it from a length you know (C).'),
       h('li', null, h('strong', null, 'Save'), ' with the legend as a PDF, a picture, or a project to edit later.')),
     h('p', { class: 'empty-formats' }, 'Ctrl+O to open, F1 for every key.')));
   const upd = () => { el.hidden = !!S.doc; };
@@ -304,6 +337,7 @@ function initDrop() {
 // ------------------------------------------------------------------ start
 
 async function start() {
+  S.meas = loadMeasPrefs();
   engine.startEngine();
   initTooltips();
   buildTopbar();
@@ -314,6 +348,7 @@ async function start() {
   initPanel($('panel'), {
     setTool, toggleLegend, deleteSelected, duplicate, zoomTo: zoomToIds, requestUI,
     markupMenu: (x, y, id) => markupMenu(x, y, id),
+    saveAs: (t) => saveAs(t), undo: () => hooks.undo(),
   });
   initTools($('ui'), hooks);
   initIO();
@@ -348,7 +383,7 @@ async function start() {
     if (f) openFile(f, true);
   }
   startRecovery();
-  window.__plantint = { S, V, T, hooks, setTool, fit, emit, engine, legendRect, writeRecovery }; // used by the automated tests
+  window.__plantint = { S, V, T, hooks, setTool, fit, emit, engine, legendRect, writeRecovery, measure, annot, units, legend: { legendLayout, legendRows, legendRect } }; // used by the automated tests
 }
 
 start();

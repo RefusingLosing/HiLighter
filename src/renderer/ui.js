@@ -154,8 +154,10 @@ export function modal({ title, body, buttons = [], dismissible = true, cancelVal
       back.remove();
       resolve(v);
     };
+    // a value function that returns undefined keeps the dialog open (e.g. a field is not valid yet)
+    const pick = (b) => { const v = typeof b.value === 'function' ? b.value() : b.value; if (v !== undefined) finish(v); };
     for (const b of buttons) {
-      const btn = h('button', { class: 'btn' + (b.primary ? ' primary' : '') + (b.danger ? ' danger' : ''), onclick: () => finish(typeof b.value === 'function' ? b.value() : b.value) }, b.label);
+      const btn = h('button', { class: 'btn' + (b.primary ? ' primary' : '') + (b.danger ? ' danger' : ''), onclick: () => pick(b) }, b.label);
       if (b.id) btn.id = b.id;
       foot.append(btn);
     }
@@ -164,9 +166,9 @@ export function modal({ title, body, buttons = [], dismissible = true, cancelVal
     layer().append(back);
     const onKey = (e) => {
       if (e.key === 'Escape' && dismissible) { e.preventDefault(); e.stopPropagation(); finish(cancelValue); }
-      else if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'INPUT') {
+      else if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA' && (e.target.tagName !== 'INPUT' || e.target.hasAttribute('data-submit'))) {
         const p = buttons.find((b) => b.primary);
-        if (p) { e.preventDefault(); e.stopPropagation(); finish(typeof p.value === 'function' ? p.value() : p.value); }
+        if (p) { e.preventDefault(); e.stopPropagation(); pick(p); }
       }
       e.stopPropagation();
     };

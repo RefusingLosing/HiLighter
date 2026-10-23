@@ -1,6 +1,6 @@
 // Pointer and keyboard interaction: tools, selection, editing, navigation.
 
-import { S, emit, on, makeMarkup, withProps, setSelection, selectedMarkups, ptToPx, uid } from './state.js';
+import { S, emit, on, makeMarkup, withProps, setSelection, selectedMarkups, ptToPx, uid, makeDim, isDimId } from './state.js';
 import { V, toSheet, zoomAt, pan, fit, setZoomPercent } from './view.js';
 import { T, geo, requestUI, requestAll, setLoupeVisible, moveLoupe, editableRings, VERTEX_EDIT_LIMIT } from './render.js';
 import * as G from './geom.js';
@@ -10,7 +10,12 @@ import { legendRect, legendLayout, clampLegendSizes } from './legend.js';
 import { toast, showMenu, modal, h, modalOpen, closeMenu } from './ui.js';
 import { rgbToHex } from './colors.js';
 import { startRename, revealInList, zoomToIds, applyStyle } from './panel.js';
-import { lengthUnit, pxToUnit, unitToPx, fmtUnitValue, parseLength } from './units.js';
+import { lengthUnit, lengthUnitLabel, pxToUnit, unitToPx, fmtUnitValue, parseLength, hasScale } from './units.js';
+import { dimLayout, hitDim, hitTag, tagLayout, tagsVisible, movedDim, offsetFor } from './annot.js';
+import { calibrateDialog } from './dialogs.js';
+import { setCalibration } from './scale.js';
+import { scaleRatio, fmtScale } from './units.js';
+import { setMeas } from './state.js';
 
 let cv = null;
 let hooks = {};
@@ -26,6 +31,8 @@ export const TOOL_INFO = {
   polygon: { label: 'Draw a polygon', key: 'P', icon: 'pentagon' },
   rect: { label: 'Draw a rectangle', key: 'R', icon: 'square' },
   gap: { label: 'Close a gap for Fill', key: 'G', icon: 'fence' },
+  dim: { label: 'Dimension: measure between two points', key: 'K', icon: 'ruler-dimension-line' },
+  calib: { label: 'Calibrate the scale from a known length', key: 'C', icon: 'ruler' },
   pick: { label: 'Pick a colour from the sheet', key: 'I', icon: 'pipette' },
   erase: { label: 'Eraser: highlights and colour in the drawing', key: 'E', icon: 'eraser' },
 };
@@ -37,6 +44,8 @@ const HINTS = {
   polygon: 'Click to place corners. Click the first corner, double-click or press Enter to close. H horizontal, V vertical, A 90° to an edge, Shift ortho.',
   rect: 'Click or drag from corner to corner. Corners snap to walls and lines (hold Ctrl to place freely). After the first corner, type a size. Shift keeps it square.',
   gap: 'Draw a line across a door or opening so Fill stops there. Double-click or Enter to finish. Gap lines never print.',
+  dim: 'Click two points to measure between them, then click where the dimension line goes. Shift: horizontal or vertical. Snaps to walls and lines (hold Ctrl to place freely).',
+  calib: 'Click both ends of a length you know (a dimension, a door, a grid spacing), then type its real length.',
   pick: 'Click the sheet or a markup to take its colour. Selected markups take the colour too.',
   erase: 'Drag to erase colour: highlights and colour painted in the drawing. Lines and paper stay. Shift+click removes a whole markup or coloured area. [ and ] change the size.',
 };
@@ -80,7 +89,7 @@ export function setTool(name) {
   if (S.tool === name) return;
   cancelDrawing();
   S.tool = name;
-  if (['fill', 'polygon', 'rect', 'gap'].includes(name) && (S.selection.size || S.legendSelected)) setSelection([]);
+  if (['fill', 'polygon', 'rect', 'gap', 'dim', 'calib'].includes(name) && (S.selection.size || S.legendSelected)) setSelection([]);
   T.brush = null;
   T.hoverVertex = null;
   T.hoverId = null;
@@ -95,16 +104,17 @@ export function hintFor(tool) { return HINTS[tool] || ''; }
 /** Drops anything half-drawn (used when another drawing opens). */
 export function resetInteraction() {
   cancelDrawing();
-  T.brush = null; T.hoverId = null; T.hoverVertex = null; T.moveIds = null; T.vertexEdit = null;
+  T.brush = null; T.hoverId = null; T.hoverVertex = null; T.moveIds = null; T.vertexEdit = null; T.dimEdit = null; T.tagEdit = null; T.hoverDimId = null; T.hoverTagId = null;
   T.legendPreview = null; T.detectPreview = null; T.detectHover = null; T.flash = null; T.busyAt = null; T.guide = null;
   P.down = false; P.mode = null; P.data = null;
 }
 
 function cancelDrawing() {
-  T.poly = null; T.rect = null; T.gap = null; T.band = null; T.snap = null; T.guide = null;
+  T.poly = null; T.rect = null; T.gap = null; T.band = null; T.snap = null; T.guide = null; T.dim = null; T.calibLine = null;
   closeDimInput();
   S.lock.once = null; S.lock.refIdx = -1; S.lock.extRef = null;
   emit('lock');
+  emit('dimstep');
 }
 
 export function updateCursor() {
@@ -114,15 +124,16 @@ export function updateCursor() {
   else if (P.mode === 'pan') c = 'grabbing';
   else if (detectMode()) c = hooks.detectCursor ? hooks.detectCursor() : 'pointer';
   else if (S.tool === 'fill') c = 'crosshair';
-  else if (S.tool === 'polygon' || S.tool === 'gap') c = 'crosshair';
+  else if (S.tool === 'polygon' || S.tool === 'gap' || S.tool === 'dim' || S.tool === 'calib') c = 'crosshair';
   else if (S.tool === 'rect') c = 'none';
   else if (S.tool === 'pick') c = 'copy';
   else if (S.tool === 'erase') c = 'none';
   else if (S.tool === 'select') {
-    if (T.hoverVertex) c = 'move';
-    else if (P.mode === 'move' || P.mode === 'legend-move') c = 'move';
+    if (T.hoverVertex || hoverDimHandle) c = 'move';
+    else if (P.mode === 'move' || P.mode === 'legend-move' || P.mode === 'tag-move' || P.mode === 'dim-handle') c = 'move';
     else if (hoverLegendHandle) c = 'nwse-resize';
-    else if (T.hoverId || hoverLegend) c = 'pointer';
+    else if (T.hoverTagId) c = 'move';
+    else if (T.hoverId || T.hoverDimId || hoverLegend) c = 'pointer';
   }
   if (S.loupe.on && S.doc && c !== 'grab' && c !== 'grabbing') c = 'none';
   cv.style.cursor = c;
@@ -162,6 +173,24 @@ function vertexAt(dx, dy) {
   const v = G.nearestVertex(rings, x, y, tolSheet(7));
   return v ? { m, ...v } : null;
 }
+
+/** Handles of the one selected dimension: its two measured points and its line (offset). */
+function dimHandleAt(dx, dy) {
+  if (S.selection.size !== 1 || !S.meas.dims) return null;
+  const id = [...S.selection][0];
+  if (!isDimId(id)) return null;
+  const d = S.dims.find((q) => q.id === id);
+  if (!d) return null;
+  const L = dimLayout(d);
+  const [x, y] = toSheet(dx, dy);
+  const tol = tolSheet(7);
+  const mid = [(L.p[0] + L.q[0]) / 2, (L.p[1] + L.q[1]) / 2];
+  for (const [which, pt] of [['a', d.a], ['b', d.b], ['off', mid]]) if (Math.hypot(pt[0] - x, pt[1] - y) <= tol) return { d, which };
+  return null;
+}
+
+/** Ends of the dimensions on the sheet, as extra snap points. */
+const dimPts = (skipId = null) => S.dims.filter((d) => d.id !== skipId).flatMap((d) => [d.a[0], d.a[1], d.b[0], d.b[1]]);
 
 const noSnap = (e) => !!(e && (e.ctrlKey || ctrlDown));
 
@@ -241,6 +270,27 @@ function snapPoint(x, y, e, extra, axes = 'xy') {
   const ls = lineSnapAt(x, y);
   const sx = axes.includes('x') && ls.x !== null, sy = axes.includes('y') && ls.y !== null;
   return { x: sx ? ls.x : x, y: sy ? ls.y : y, sx, sy, mark: null };
+}
+
+/**
+ * A point for the dimension and calibrate tools: snaps to markup corners and edges, dimension
+ * ends and the drawing's lines; with Shift (and a start point) the line stays horizontal or
+ * vertical while the free end still stops at a wall or line.
+ */
+function dimPoint(e, x, y, from = null, skipId = null) {
+  const extra = dimPts(skipId);
+  if (from && e && e.shiftKey) {
+    const horiz = Math.abs(x - from[0]) >= Math.abs(y - from[1]);
+    const p = horiz ? snapPoint(x, from[1], e, extra, 'x') : snapPoint(from[0], y, e, extra, 'y');
+    const q = horiz ? [p.x, from[1]] : [from[0], p.y];
+    T.snap = p.mark ? { ...p.mark, x: q[0], y: q[1] } : null;
+    T.guide = { x: q[0], y: q[1], sx: horiz && p.sx, sy: !horiz && p.sy, cross: false };
+    return q;
+  }
+  const p = snapPoint(x, y, e, extra);
+  T.snap = p.mark;
+  T.guide = { x: p.x, y: p.y, sx: p.sx, sy: p.sy, cross: false };
+  return [p.x, p.y];
 }
 
 function rehover() {
@@ -344,7 +394,7 @@ function onUp(e) {
 
 function onCancel() {
   P.down = false; P.mode = null; P.data = null;
-  T.moveIds = null; T.vertexEdit = null; T.band = null; T.legendPreview = null;
+  T.moveIds = null; T.vertexEdit = null; T.band = null; T.legendPreview = null; T.dimEdit = null; T.tagEdit = null;
   requestAll();
 }
 
@@ -408,7 +458,19 @@ function onContext(e) {
     ]);
     return;
   }
-  const m = hitMarkup(x, y);
+  const tg = hitTag(x, y);
+  const dm = tg ? null : hitDim(x, y, tolSheet(6));
+  if (dm) {
+    if (!S.selection.has(dm.id)) setSelection([dm.id]);
+    const n = S.selection.size;
+    showMenu(e.clientX, e.clientY, [
+      { label: 'Move the line to the other side', icon: 'arrow-down-to-line', disabled: n !== 1 || !dm.off, onClick: () => flipDim(dm.id) },
+      'sep',
+      { label: n > 1 ? `Delete ${n} items` : 'Delete dimension', key: 'Del', icon: 'trash-2', danger: true, onClick: deleteSelected },
+    ]);
+    return;
+  }
+  const m = tg || hitMarkup(x, y);
   if (m) {
     if (!S.selection.has(m.id)) setSelection([m.id]);
     markupMenu(e.clientX, e.clientY, m.id);
@@ -437,11 +499,12 @@ export function markupMenu(cx, cy, id) {
     { label: 'Rename', key: 'F2', icon: 'pen-line', disabled: n !== 1, onClick: () => startRename(id) },
     { label: n > 1 ? 'Zoom to these' : 'Zoom to it', icon: 'locate', onClick: () => zoomToIds([...S.selection]) },
     { label: 'Duplicate', key: 'Ctrl+D', icon: 'copy', onClick: duplicate },
+    ...(tagsVisible() && S.markups.some((m) => S.selection.has(m.id) && m.tagAt) ? [{ label: 'Put the area tag back in the middle', icon: 'tag', onClick: resetTags }] : []),
     'sep',
     { label: 'Bring to front', icon: 'arrow-up-to-line', onClick: () => reorder(true) },
     { label: 'Send to back', icon: 'arrow-down-to-line', onClick: () => reorder(false) },
     'sep',
-    { label: n > 1 ? `Delete ${n} markups` : 'Delete', key: 'Del', icon: 'trash-2', danger: true, onClick: deleteSelected },
+    { label: n > 1 ? (S.dims.some((d) => S.selection.has(d.id)) ? `Delete ${n} items` : `Delete ${n} markups`) : 'Delete', key: 'Del', icon: 'trash-2', danger: true, onClick: deleteSelected },
   ]);
 }
 
@@ -449,6 +512,8 @@ export function markupMenu(cx, cy, id) {
 
 let hoverLegend = false;
 let hoverLegendHandle = false;
+let hoverDimHandle = false;
+let lastHoverKey = '';
 
 function updateHover() {
   if (S.tool !== 'select' || !T.cursor || !lastMoveEvent) return;
@@ -459,19 +524,58 @@ function updateHover() {
 
 const brushRadius = () => (S.eraser.size / 2) * V.dpr / V.scale;
 
+/** Click selection: Ctrl toggles, Shift adds, a plain click selects only this (unless it is already selected). */
+function selectHit(id, e) {
+  if (e.ctrlKey) {
+    const s = new Set(S.selection);
+    if (s.has(id)) s.delete(id); else s.add(id);
+    setSelection([...s], S.legendSelected);
+  } else if (e.shiftKey) {
+    setSelection([...new Set([...S.selection, id])], S.legendSelected);
+  } else if (!S.selection.has(id)) {
+    setSelection([id]);
+  }
+}
+
+/** A markup moved by (dx, dy), with its tag. */
+function movedMarkup(m, dx, dy) {
+  return withProps(m, { rings: G.translateRings(m.rings, dx, dy), ...(m.tagAt ? { tagAt: [m.tagAt[0] + dx, m.tagAt[1] + dy] } : {}) });
+}
+
+/** After a markup's shape changed: a dragged tag that is no longer inside goes back to automatic. */
+function keepTag(m) {
+  if (!m.tagAt || G.pointInRings(m.rings, m.tagAt[0], m.tagAt[1])) return m;
+  return withProps(m, { tagAt: null });
+}
+
+function moveLabel(ids) {
+  const nm = S.markups.filter((m) => ids.has(m.id)).length, nd = S.dims.filter((d) => ids.has(d.id)).length;
+  if (nd && !nm) return nd > 1 ? `Move ${nd} dimensions` : 'Move dimension';
+  if (nm && !nd) return nm > 1 ? `Move ${nm} markups` : 'Move markup';
+  return `Move ${nm + nd} items`;
+}
+
 const HOVER = {
   select(e, x, y, dev) {
     if (!dev) dev = [x * V.scale + V.tx, y * V.scale + V.ty];
     const v = vertexAt(dev[0], dev[1]);
     const hv = v ? { ri: v.ri, vi: v.vi } : null;
-    hoverLegendHandle = onLegendHandle(dev[0], dev[1]);
-    hoverLegend = !hoverLegendHandle && inLegend(x, y);
-    const m = v || hoverLegend || hoverLegendHandle ? null : hitMarkup(x, y);
-    const changed = (m ? m.id : null) !== T.hoverId || JSON.stringify(hv) !== JSON.stringify(T.hoverVertex);
-    T.hoverId = m ? m.id : null;
+    const dh = v ? null : dimHandleAt(dev[0], dev[1]);
+    hoverDimHandle = !!dh;
+    hoverLegendHandle = !v && !dh && onLegendHandle(dev[0], dev[1]);
+    hoverLegend = !hoverLegendHandle && !v && !dh && inLegend(x, y);
+    const free = !v && !dh && !hoverLegend && !hoverLegendHandle;
+    const tg = free ? hitTag(x, y) : null;
+    const dm = free && !tg ? hitDim(x, y, tolSheet(6)) : null;
+    const m = free && !tg && !dm ? hitMarkup(x, y) : null;
+    const key = [m && m.id, tg && tg.id, dm && dm.id, hv ? hv.ri + ':' + hv.vi : '', dh ? dh.which : ''].join('|');
+    T.hoverId = m ? m.id : tg ? tg.id : null;
+    T.hoverTagId = tg ? tg.id : null;
+    T.hoverDimId = dm ? dm.id : null;
     T.hoverVertex = hv;
+    T.hoverDimHandle = dh ? dh.which : null;
     updateCursor();
-    if (changed) requestUI();
+    if (key !== lastHoverKey) { lastHoverKey = key; requestUI(); }
   },
   polygon(e, x, y) {
     if (!T.poly) {
@@ -516,6 +620,19 @@ const HOVER = {
   },
   fill() { if (S.loupe.on) requestUI(); },
   pick() { if (S.loupe.on) requestUI(); },
+  dim(e, x, y) {
+    if (!T.dim) { dimPoint(e, x, y); requestUI(); return; }
+    if (T.dim.phase === 'b') { T.dim.cur = dimPoint(e, x, y, T.dim.a); requestUI(); return; }
+    T.dim.off = offsetFor(T.dim, x, y);
+    T.snap = null; T.guide = null;
+    requestUI();
+  },
+  calib(e, x, y) {
+    if (T.calibLine && T.calibLine.done) return;
+    if (!T.calibLine) { dimPoint(e, x, y); requestUI(); return; }
+    T.calibLine.cur = dimPoint(e, x, y, T.calibLine.a);
+    requestUI();
+  },
 };
 
 function squareIf(e, q) {
@@ -534,6 +651,13 @@ const DOWN = {
       T.vertexEdit = { id: v.m.id, rings: v.m.rings.map((r) => r.slice()) };
       return;
     }
+    const dh = dimHandleAt(dev[0], dev[1]);
+    if (dh && !e.shiftKey && !e.ctrlKey) {
+      P.mode = 'dim-handle';
+      P.data = { id: dh.d.id, which: dh.which, d0: dh.d };
+      T.dimEdit = { ...dh.d };
+      return;
+    }
     if (onLegendHandle(dev[0], dev[1])) {
       const L = S.legend;
       const lay = legendLayout(L);
@@ -547,19 +671,21 @@ const DOWN = {
       P.data = { L: S.legend };
       return;
     }
-    const m = hitMarkup(x, y);
-    if (m) {
-      if (e.ctrlKey) {
-        const s = new Set(S.selection);
-        if (s.has(m.id)) s.delete(m.id); else s.add(m.id);
-        setSelection([...s], S.legendSelected);
-      } else if (e.shiftKey) {
-        setSelection([...new Set([...S.selection, m.id])], S.legendSelected);
-      } else if (!S.selection.has(m.id)) {
-        setSelection([m.id]);
-      }
-      revealInList(m.id);
-      if (S.selection.has(m.id)) { P.mode = 'move-pending'; P.data = { ids: new Set(S.selection) }; }
+    const tg = hitTag(x, y);
+    if (tg) {
+      selectHit(tg.id, e);
+      revealInList(tg.id);
+      const t = tagLayout(S.markups.indexOf(tg));
+      if (t) { P.mode = 'tag-pending'; P.data = { id: tg.id, at0: [t.cx, t.cy] }; }
+      return;
+    }
+    const dm = hitDim(x, y, tolSheet(6));
+    const m = dm ? null : hitMarkup(x, y);
+    const hit = dm || m;
+    if (hit) {
+      selectHit(hit.id, e);
+      if (m) revealInList(m.id);
+      if (S.selection.has(hit.id)) { P.mode = 'move-pending'; P.data = { ids: new Set(S.selection) }; }
       return;
     }
     P.mode = 'band';
@@ -624,6 +750,43 @@ const DOWN = {
     requestUI();
   },
   pick(e, x, y) { pickAt(x, y); },
+  dim(e, x, y) {
+    if (!T.dim) {
+      const q = dimPoint(e, x, y);
+      T.dim = { a: q, cur: q, b: null, off: 0, phase: 'b' };
+      T.snap = null;
+      emit('dimstep');
+      requestUI();
+      return;
+    }
+    if (T.dim.phase === 'b') {
+      const q = dimPoint(e, x, y, T.dim.a);
+      if (Math.hypot(q[0] - T.dim.a[0], q[1] - T.dim.a[1]) * V.scale < 3 * V.dpr) return;
+      T.dim.b = q; T.dim.cur = q; T.dim.phase = 'off'; T.dim.off = 0;
+      T.snap = null; T.guide = null;
+      P.mode = 'none';
+      emit('dimstep');
+      requestUI();
+      return;
+    }
+    P.mode = 'none';
+    finishDim(offsetFor(T.dim, x, y));
+  },
+  calib(e, x, y) {
+    if (T.calibLine && T.calibLine.done) return;
+    if (!T.calibLine) {
+      const q = dimPoint(e, x, y);
+      T.calibLine = { a: q, cur: q, done: false };
+      T.snap = null;
+      emit('dimstep');
+      requestUI();
+      return;
+    }
+    const q = dimPoint(e, x, y, T.calibLine.a);
+    if (Math.hypot(q[0] - T.calibLine.a[0], q[1] - T.calibLine.a[1]) * V.scale < 3 * V.dpr) return;
+    P.mode = 'none';
+    runCalibrate(T.calibLine.a, q);
+  },
   erase(e, x, y, dev) {
     if (eraseBusy) return;
     if (e.shiftKey) {
@@ -640,6 +803,25 @@ const DOWN = {
 const DRAG = {
   select(e, x, y) {
     const dx = x - P.start[0], dy = y - P.start[1];
+    if (P.mode === 'dim-handle') {
+      const d0 = P.data.d0;
+      if (P.data.which === 'off') {
+        T.dimEdit = { ...d0, off: offsetFor(d0, x, y) };
+        T.snap = null; T.guide = null;
+      } else {
+        const other = P.data.which === 'a' ? d0.b : d0.a;
+        T.dimEdit = { ...d0, [P.data.which]: dimPoint(e, x, y, other, P.data.id) };
+      }
+      requestAll();
+      return;
+    }
+    if (P.mode === 'tag-pending' && P.moved) P.mode = 'tag-move';
+    if (P.mode === 'tag-move') {
+      T.tagEdit = { id: P.data.id, at: [P.data.at0[0] + dx, P.data.at0[1] + dy] };
+      requestAll();
+      updateCursor();
+      return;
+    }
     if (P.mode === 'vertex') {
       let nx = P.data.ox + dx, ny = P.data.oy + dy;
       if (e.shiftKey) { if (Math.abs(dx) >= Math.abs(dy)) ny = P.data.oy; else nx = P.data.ox; }
@@ -712,15 +894,35 @@ const DRAG = {
   },
   polygon(e, x, y) { HOVER.polygon(e, x, y); },
   gap(e, x, y) { HOVER.gap(e, x, y); },
+  dim(e, x, y) { if (P.mode !== 'none') HOVER.dim(e, x, y); },
+  calib(e, x, y) { if (P.mode !== 'none') HOVER.calib(e, x, y); },
 };
 
 const UP = {
   select(e, x, y) {
+    if (P.mode === 'dim-handle') {
+      const de = T.dimEdit;
+      T.dimEdit = null; T.snap = null; T.guide = null;
+      if (P.moved && de) {
+        if (Math.hypot(de.b[0] - de.a[0], de.b[1] - de.a[1]) < 0.5) toast('A dimension needs two different points.');
+        else change(P.data.which === 'off' ? 'Move dimension line' : 'Edit dimension', () => { S.dims = S.dims.map((d) => (d.id === de.id ? Object.freeze({ ...de }) : d)); });
+      }
+      requestAll();
+      return;
+    }
+    if (P.mode === 'tag-move') {
+      const te = T.tagEdit;
+      T.tagEdit = null;
+      if (te) change('Move area tag', () => { S.markups = S.markups.map((m) => (m.id === te.id ? withProps(m, { tagAt: te.at }) : m)); });
+      requestAll();
+      return;
+    }
+    if (P.mode === 'tag-pending') return;
     if (P.mode === 'vertex') {
       const ve = T.vertexEdit;
       T.vertexEdit = null; T.snap = null; T.guide = null;
       if (P.moved && ve) {
-        change('Move corner', () => { S.markups = S.markups.map((m) => (m.id === ve.id ? withProps(m, { rings: ve.rings }) : m)); });
+        change('Move corner', () => { S.markups = S.markups.map((m) => (m.id === ve.id ? keepTag(withProps(m, { rings: ve.rings })) : m)); });
       }
       requestAll();
       return;
@@ -735,15 +937,16 @@ const UP = {
     if (P.mode === 'move') {
       const ids = T.moveIds, dx = T.moveDx, dy = T.moveDy;
       T.moveIds = null; T.moveDx = 0; T.moveDy = 0;
-      if (dx || dy) change(ids.size > 1 ? `Move ${ids.size} markups` : 'Move markup', () => {
-        S.markups = S.markups.map((m) => (ids.has(m.id) ? withProps(m, { rings: G.translateRings(m.rings, dx, dy) }) : m));
+      if (dx || dy) change(moveLabel(ids), () => {
+        S.markups = S.markups.map((m) => (ids.has(m.id) ? movedMarkup(m, dx, dy) : m));
+        S.dims = S.dims.map((d) => (ids.has(d.id) ? Object.freeze(movedDim(d, dx, dy)) : d));
       });
       requestAll();
       return;
     }
     if (P.mode === 'move-pending') {
       if (!e.shiftKey && !e.ctrlKey && S.selection.size > 1) {
-        const m = hitMarkup(x, y);
+        const m = hitDim(x, y, tolSheet(6)) || hitMarkup(x, y);
         if (m) setSelection([m.id]);
       }
       return;
@@ -758,6 +961,14 @@ const UP = {
         if (b.crossing) return G.ringsTouchRect(m.rings, r);
         return g[0] >= r[0] && g[1] >= r[1] && g[2] <= r[2] && g[3] <= r[3];
       }).map((m) => m.id);
+      if (S.meas.dims) {
+        for (const d of S.dims) {
+          const g = dimLayout(d).bbox;
+          const inside = g[0] >= r[0] && g[1] >= r[1] && g[2] <= r[2] && g[3] <= r[3];
+          const touch = !(g[2] < r[0] || g[0] > r[2] || g[3] < r[1] || g[1] > r[3]);
+          if (b.crossing ? touch : inside) hits.push(d.id);
+        }
+      }
       const lr = legendRect();
       const legHit = !!lr && (b.crossing ? !(lr[2] < r[0] || lr[0] > r[2] || lr[3] < r[1] || lr[1] > r[3]) : lr[0] >= r[0] && lr[1] >= r[1] && lr[2] <= r[2] && lr[3] <= r[3]);
       setSelection(P.data.add ? [...new Set([...S.selection, ...hits])] : hits, legHit || (P.data.add && S.legendSelected));
@@ -768,6 +979,22 @@ const UP = {
     if (!T.rect) return;
     if (!P.moved && !T.rect.waiting) { T.rect.waiting = true; emit('rect'); return; }
     if (!T.rect.waiting) finishRect();
+  },
+  dim(e, x, y) {
+    // pressed on the first point and dragged to the second
+    if (P.mode === 'none' || !P.moved || !T.dim || T.dim.phase !== 'b') return;
+    const q = dimPoint(e, x, y, T.dim.a);
+    if (Math.hypot(q[0] - T.dim.a[0], q[1] - T.dim.a[1]) * V.scale < 3 * V.dpr) return;
+    T.dim.b = q; T.dim.cur = q; T.dim.phase = 'off'; T.dim.off = 0;
+    T.snap = null; T.guide = null;
+    emit('dimstep');
+    requestUI();
+  },
+  calib(e, x, y) {
+    if (P.mode === 'none' || !P.moved || !T.calibLine || T.calibLine.done) return;
+    const q = dimPoint(e, x, y, T.calibLine.a);
+    if (Math.hypot(q[0] - T.calibLine.a[0], q[1] - T.calibLine.a[1]) * V.scale < 3 * V.dpr) return;
+    runCalibrate(T.calibLine.a, q);
   },
   erase(e) {
     if (P.mode !== 'erase' || !T.brush || !T.brush.stroke) return;
@@ -780,6 +1007,9 @@ const UP = {
 
 const DBL = {
   select(e, x, y) {
+    const tg = hitTag(x, y);
+    if (tg) { setSelection([tg.id]); startRename(tg.id); return; } // a tag: rename its markup
+    if (hitDim(x, y, tolSheet(6))) return; // a dimension lies over the markup here
     if (S.selection.size === 1) {
       const m = S.markups.find((q) => S.selection.has(q.id));
       if (m && G.vertexCount(m.rings) <= VERTEX_EDIT_LIMIT) {
@@ -1045,7 +1275,7 @@ export function openDimInput(firstKey = '') {
   const wv = pxToUnit(Math.abs(r.x1 - r.x0)), hv = pxToUnit(Math.abs(r.y1 - r.y0));
   wIn.value = firstKey !== '' ? firstKey : fmtUnitValue(wv);
   hIn.value = fmtUnitValue(hv);
-  unitEl.textContent = lengthUnit();
+  unitEl.textContent = lengthUnitLabel();
   dimBox.hidden = false;
   repositionDimBox();
   wIn.focus();
@@ -1083,7 +1313,7 @@ function previewDims() {
 
 function applyDims() {
   const [wv, hv] = dimValues();
-  if (!(wv > 0) || !(hv > 0)) { toast(`Type a width and a height in ${lengthUnit()}, for example 4.40 and 3.20.`); return; }
+  if (!(wv > 0) || !(hv > 0)) { toast(lengthUnit() === 'ftin' ? 'Type a width and a height, for example 14\'6" and 10\'.' : `Type a width and a height in ${lengthUnitLabel()}, for example 4.40 and 3.20.`); return; }
   previewDims();
   finishRect();
 }
@@ -1092,6 +1322,47 @@ function closeDimInput() {
   if (!dimBox) return;
   dimBox.hidden = true;
   if (document.activeElement === wIn || document.activeElement === hIn) cv && cv.focus && document.activeElement.blur();
+}
+
+// ------------------------------------------------------------------ dimensions
+
+let warnedNoScale = false;
+
+function finishDim(off) {
+  const t = T.dim;
+  T.dim = null; T.snap = null; T.guide = null;
+  emit('dimstep');
+  if (!t || !t.b) { requestUI(); return; }
+  const d = makeDim(t.a, t.b, off);
+  change('Dimension', () => {
+    S.dims = [...S.dims, d];
+    if (!S.meas.dims) setMeas({ dims: true });
+  });
+  if (!hasScale() && !warnedNoScale) {
+    warnedNoScale = true;
+    toast('This drawing has no scale yet, so dimensions show millimetres on the sheet. Calibrate (C) or type the scale to measure real sizes.', { timeout: 8000 });
+  }
+  requestAll();
+}
+
+// ------------------------------------------------------------------ calibrate
+
+async function runCalibrate(a, b) {
+  T.calibLine = { a, cur: b, done: true };
+  T.snap = null; T.guide = null;
+  requestUI();
+  const px = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  let r = null;
+  try { r = await calibrateDialog({ px }); } finally { T.calibLine = null; emit('dimstep'); requestUI(); }
+  if (!r) return;
+  setCalibration({ a, b, px, lengthM: r.lengthM, unit: r.unit });
+  const n = scaleRatio();
+  const title = S.doc.scale;
+  let msg = `Scale set${n || hasScale() ? ' to ' + fmtScale() : ''}. Check it by dimensioning another length you know (K).`;
+  if (title && n && Math.abs(n - title) / title > 0.02) msg = `Scale set to ${fmtScale()}. The title block says 1:${title}, so this print is probably not at its stated scale.`;
+  toast(msg, { timeout: 8000 });
+  setTool('select');
+  requestAll();
 }
 
 // ------------------------------------------------------------------ gap lines
@@ -1146,7 +1417,7 @@ async function eraseStroke(stroke, r, dev) {
   try {
     await runExclusive(async () => {
       const before = snapshot();
-      let markupsChanged = false, colourChanged = false;
+      let markupsChanged = false, colourChanged = false, dimsChanged = false;
       if (mode !== 'drawing' || targets) {
         const area = G.strokeArea(stroke, r);
         if (area.length) {
@@ -1161,9 +1432,23 @@ async function eraseStroke(stroke, r, dev) {
             markupsChanged = true;
             const pcs = G.pieces(nr).filter((p) => p.area >= 4);
             if (!pcs.length) return [];
-            return [withProps(m, { rings: pcs.flatMap((p) => p.rings) })];
+            return [keepTag(withProps(m, { rings: pcs.flatMap((p) => p.rings) }))];
           });
           if (markupsChanged) S.markups = next;
+          if (S.meas.dims && S.dims.length) {
+            // a dimension the brush passes over is erased whole
+            const keepD = S.dims.filter((d) => {
+              if (targets && !targets.has(d.id)) return true;
+              const L = dimLayout(d);
+              const b = L.bbox;
+              if (b[2] < ab[0] || b[0] > ab[2] || b[3] < ab[1] || b[1] > ab[3]) return true;
+              for (let i = 0; i < stroke.length; i += 2) {
+                for (const sg of L.segs) if (G.nearestPointOnSeg(stroke[i], stroke[i + 1], sg[0], sg[1], sg[2], sg[3]).d <= r) return false;
+              }
+              return true;
+            });
+            if (keepD.length !== S.dims.length) { S.dims = keepD; dimsChanged = true; }
+          }
           if (!targets) {
             const keep = S.gaps.filter((g) => {
               for (let i = 0; i < stroke.length; i += 2) if (G.distToPolyline(g.pts, stroke[i], stroke[i + 1]) <= r) return false;
@@ -1182,9 +1467,10 @@ async function eraseStroke(stroke, r, dev) {
           colourChanged = true;
         }
       }
-      const label = colourChanged && markupsChanged ? 'Erase' : colourChanged ? 'Erase drawing colour' : 'Erase highlight';
+      const parts = [markupsChanged, dimsChanged, colourChanged].filter(Boolean).length;
+      const label = parts > 1 ? 'Erase' : colourChanged ? 'Erase drawing colour' : dimsChanged ? 'Erase dimension' : 'Erase highlight';
       if (commit(label, before)) {
-        const ids = new Set(S.markups.map((m) => m.id));
+        const ids = new Set([...S.markups.map((m) => m.id), ...S.dims.map((d) => d.id)]);
         S.selection = new Set([...S.selection].filter((id) => ids.has(id)));
         emit('selection');
       } else if (mode === 'drawing') {
@@ -1204,6 +1490,14 @@ async function eraseStroke(stroke, r, dev) {
 async function shiftErase(x, y, dev) {
   const mode = S.eraser.mode;
   const targets = S.selection.size ? new Set(S.selection) : null;
+  const dm = mode !== 'drawing' ? hitDim(x, y, tolSheet(6)) : null;
+  if (dm && (!targets || targets.has(dm.id))) {
+    change('Delete dimension', () => { S.dims = S.dims.filter((q) => q.id !== dm.id); });
+    S.selection.delete(dm.id);
+    emit('selection');
+    toast('Removed the dimension.', { action: 'Undo', onAction: hooks.undo });
+    return;
+  }
   const m = hitMarkup(x, y);
   if (m && mode !== 'drawing' && (!targets || targets.has(m.id))) {
     change('Delete markup', () => { S.markups = S.markups.filter((q) => q.id !== m.id); });
@@ -1251,10 +1545,16 @@ export function deleteSelected() {
   const ids = new Set(S.selection);
   if (S.legendSelected && !ids.size) { hooks.toggleLegend(false); return; }
   if (!ids.size) return;
-  const n = ids.size;
-  change(n > 1 ? `Delete ${n} markups` : 'Delete markup', () => { S.markups = S.markups.filter((m) => !ids.has(m.id)); });
+  const nm = S.markups.filter((m) => ids.has(m.id)).length, nd = S.dims.filter((d) => ids.has(d.id)).length;
+  if (!nm && !nd) return;
+  const what = nd && !nm ? (nd > 1 ? `${nd} dimensions` : '1 dimension') : nm && !nd ? (nm > 1 ? `${nm} markups` : '1 markup') : `${nm + nd} items`;
+  const label = nd && !nm ? (nd > 1 ? `Delete ${nd} dimensions` : 'Delete dimension') : nm && !nd ? (nm > 1 ? `Delete ${nm} markups` : 'Delete markup') : `Delete ${nm + nd} items`;
+  change(label, () => {
+    S.markups = S.markups.filter((m) => !ids.has(m.id));
+    S.dims = S.dims.filter((d) => !ids.has(d.id));
+  });
   setSelection([]);
-  toast(n > 1 ? `Deleted ${n} markups.` : 'Deleted 1 markup.', { action: 'Undo', onAction: hooks.undo });
+  toast(`Deleted ${what}.`, { action: 'Undo', onAction: hooks.undo });
 }
 
 export function copySelected() {
@@ -1265,8 +1565,9 @@ export function copySelected() {
 export function paste() {
   if (!clipboard.length || !S.doc) return;
   const off = (24 * V.dpr) / V.scale;
-  const fresh = clipboard.map((m) => Object.freeze({ ...m, id: uid('m'), rings: G.translateRings(m.rings, off, off) }));
-  clipboard = clipboard.map((m) => ({ ...m, rings: G.translateRings(m.rings, off, off) }));
+  const shift = (m) => ({ ...m, rings: G.translateRings(m.rings, off, off), ...(m.tagAt ? { tagAt: [m.tagAt[0] + off, m.tagAt[1] + off] } : {}) });
+  const fresh = clipboard.map((m) => Object.freeze({ ...shift(m), id: uid('m') }));
+  clipboard = clipboard.map(shift);
   change(fresh.length > 1 ? `Paste ${fresh.length} markups` : 'Paste markup', () => { S.markups = [...S.markups, ...fresh]; });
   setSelection(fresh.map((m) => m.id));
 }
@@ -1276,6 +1577,16 @@ export function duplicate() {
   if (!sel.length) return;
   clipboard = sel.map((m) => ({ ...m }));
   paste();
+}
+
+function resetTags() {
+  const ids = S.selection;
+  change('Reset area tag', () => { S.markups = S.markups.map((m) => (ids.has(m.id) && m.tagAt ? withProps(m, { tagAt: null }) : m)); });
+}
+
+/** Mirrors the dimension line to the other side of the measured points. */
+function flipDim(id) {
+  change('Flip dimension', () => { S.dims = S.dims.map((d) => (d.id === id ? Object.freeze({ ...d, off: -(d.off || 0) }) : d)); });
 }
 
 function reorder(front) {
@@ -1292,7 +1603,7 @@ function deleteVertex(id, ri, vi) {
     S.markups = S.markups.map((m) => {
       if (m.id !== id) return m;
       const rings = m.rings.map((r, i) => (i === ri && r.length > 6 ? [...r.slice(0, vi * 2), ...r.slice(vi * 2 + 2)] : r));
-      return withProps(m, { rings });
+      return keepTag(withProps(m, { rings }));
     });
   });
 }
@@ -1303,14 +1614,25 @@ function nudge(dx, dy) {
     if (S.legendSelected && S.legend) change('Move legend', () => { S.legend = Object.freeze({ ...S.legend, x: S.legend.x + dx, y: S.legend.y + dy }); });
     return;
   }
-  change('Nudge', () => { S.markups = S.markups.map((m) => (ids.has(m.id) ? withProps(m, { rings: G.translateRings(m.rings, dx, dy) }) : m)); });
+  change('Nudge', () => {
+    S.markups = S.markups.map((m) => (ids.has(m.id) ? movedMarkup(m, dx, dy) : m));
+    S.dims = S.dims.map((d) => (ids.has(d.id) ? Object.freeze(movedDim(d, dx, dy)) : d));
+  });
 }
 
 // ------------------------------------------------------------------ keyboard
 
+const NOT_TEXT = ['checkbox', 'radio', 'range', 'color', 'button', 'submit'];
+/** True while a text field has the keys (a ticked checkbox or a slider must not swallow shortcuts). */
 function typing(e) {
   const t = e.target;
-  return t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+  if (!t) return false;
+  if (t.tagName === 'INPUT') {
+    if (t.type === 'range') return /^(Arrow|Home|End|Page)/.test(e.key);
+    if (NOT_TEXT.includes(t.type)) return e.key === ' ' || e.key === 'Enter';
+    return true;
+  }
+  return t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable;
 }
 
 function onKeyDown(e) {
@@ -1343,6 +1665,12 @@ function onKeyDown(e) {
     if (lk === 'n') { e.preventDefault(); S.lock.mode = 'free'; S.lock.once = null; S.lock.extRef = null; emit('lock'); refreshPolyCursor(); return; }
     if (k === 'F8') { e.preventDefault(); S.lock.mode = S.lock.mode === 'ortho' ? 'free' : 'ortho'; emit('lock'); refreshPolyCursor(); return; }
   }
+  if (S.tool === 'dim' && T.dim) {
+    if (k === 'Enter' && T.dim.phase === 'off') { e.preventDefault(); finishDim(T.dim.off); return; }
+    if (k === 'Escape') { e.preventDefault(); cancelDrawing(); requestUI(); return; }
+    if (k === 'Backspace') { e.preventDefault(); if (T.dim.phase === 'off') { T.dim.phase = 'b'; T.dim.b = null; T.dim.off = 0; } else T.dim = null; emit('dimstep'); refreshDimCursor(); return; }
+  }
+  if (S.tool === 'calib' && T.calibLine && !T.calibLine.done && (k === 'Escape' || k === 'Backspace')) { e.preventDefault(); cancelDrawing(); requestUI(); return; }
   if (S.tool === 'gap' && T.gap) {
     if (k === 'Enter') { e.preventDefault(); finishGap(); return; }
     if (k === 'Escape') { e.preventDefault(); T.gap = null; requestUI(); return; }
@@ -1354,7 +1682,7 @@ function onKeyDown(e) {
     if (!spaceDown) { spaceDown = true; updateCursor(); }
     return;
   }
-  if (ctrl && (k === 'a' || k === 'A')) { e.preventDefault(); setSelection(S.markups.map((m) => m.id)); return; }
+  if (ctrl && (k === 'a' || k === 'A')) { e.preventDefault(); setSelection([...S.markups.map((m) => m.id), ...(S.meas.dims ? S.dims.map((d) => d.id) : [])]); return; }
   if (ctrl && (k === 'c' || k === 'C')) { e.preventDefault(); copySelected(); return; }
   if (ctrl && (k === 'v' || k === 'V')) { e.preventDefault(); paste(); return; }
   if (ctrl && (k === 'd' || k === 'D')) { e.preventDefault(); duplicate(); return; }
@@ -1362,7 +1690,7 @@ function onKeyDown(e) {
   if (ctrl && (k === '1')) { e.preventDefault(); setZoomPercent(100); requestAll(); emit('view'); return; }
   if (k === 'Delete' || (k === 'Backspace' && S.tool === 'select')) { e.preventDefault(); deleteSelected(); return; }
   if (k === 'Escape') {
-    if (T.rect || T.gap || T.poly) { cancelDrawing(); requestUI(); return; }
+    if (T.rect || T.gap || T.poly || T.dim || T.calibLine) { cancelDrawing(); requestUI(); return; }
     if (S.selection.size || S.legendSelected) setSelection([]);
     return;
   }
@@ -1391,7 +1719,7 @@ function onKeyDown(e) {
     return;
   }
   if (ctrl || e.altKey) return;
-  const map = { s: 'select', f: 'fill', p: 'polygon', r: 'rect', g: 'gap', i: 'pick', e: 'erase' };
+  const map = { s: 'select', f: 'fill', p: 'polygon', r: 'rect', g: 'gap', i: 'pick', e: 'erase', k: 'dim', c: 'calib' };
   const lk = k.toLowerCase();
   if (map[lk]) { e.preventDefault(); setTool(map[lk]); return; }
   if (lk === 'm') { e.preventDefault(); hooks.toggleLoupe(); return; }
@@ -1402,6 +1730,11 @@ function onKeyDown(e) {
 function onKeyUp(e) {
   if (e.key === 'Control') { ctrlDown = false; rehover(); }
   if (e.key === ' ') { spaceDown = false; updateCursor(); }
+}
+
+function refreshDimCursor() {
+  if (T.cursor && lastMoveEvent) HOVER.dim(lastMoveEvent, T.cursor[0], T.cursor[1]);
+  requestUI();
 }
 
 function refreshPolyCursor() {
