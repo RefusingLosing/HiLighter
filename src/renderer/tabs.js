@@ -1,5 +1,5 @@
-// PlanTint — the tab strip. One tab per open drawing. Clicks and shortcuts are sent to the main
-// process, which owns the drawings; the main process sends back the list whenever it changes.
+// PlanTint — the tab strip. One tab per open drawing. Clicks are sent to the main process, which owns
+// the drawings and handles the tab keys; it sends back the list whenever it changes.
 'use strict';
 
 const list = document.getElementById('tabs');
@@ -44,15 +44,6 @@ function render(tabs) {
   const active = list.querySelector('.tab.active');
   if (active) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
-
-// keys pressed while the strip has the focus (the drawing pages handle their own)
-document.addEventListener('keydown', (e) => {
-  const ctrl = e.ctrlKey || e.metaKey;
-  if (!ctrl) return;
-  if (e.key === 'n' || e.key === 'N') { e.preventDefault(); window.plantint.newTab(); }
-  else if (e.key === 'w' || e.key === 'W') { e.preventDefault(); window.plantint.closeTab(); }
-  else if (e.key === 'Tab') { e.preventDefault(); window.plantint.switchTab(e.shiftKey ? -1 : 1); }
-});
 
 window.plantint.onTabs(render);
 window.plantint.tabsReady();

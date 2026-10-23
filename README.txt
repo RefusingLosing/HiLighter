@@ -1,13 +1,13 @@
-PlanTint 1.4
+PlanTint 1.4.1
 Highlighting and measuring for architectural and technical drawings.
 
 INSTALL
-  PlanTint-Setup-1.4.0.exe
+  PlanTint-Setup-1.4.1.exe
       Installs for your Windows user only (no admin rights needed), adds Start menu and
       desktop shortcuts, and opens .plantint project files when you double-click them.
       Recommended. Installing over an earlier version keeps your settings.
 
-  PlanTint-1.4.0-portable.exe
+  PlanTint-1.4.1-portable.exe
       One file, nothing installed. It unpacks itself each time, so it starts a few
       seconds slower than the installed version.
 
@@ -19,17 +19,23 @@ WHAT'S NEW IN 1.4: TABS
   of a browser. Each tab is its own drawing, with its own markings, scale, measurements
   and unsaved-work question.
 
-  - Ctrl+N opens a new, empty tab. Ctrl+O loads a drawing or project into the tab you
-    are in. Click a tab's name to show it, or press Ctrl+Tab (Ctrl+Shift+Tab goes back).
-    A dot on a tab means it has unsaved work.
-  - Ctrl+W closes the tab you are in and leaves the others open. Closing the window asks
-    about each tab with unsaved work, one after the other.
+  - Opening a drawing (Ctrl+O, the Open button, or dropping a file on the window) puts
+    it in a new tab when the tab you are in already has a drawing; an empty tab takes it
+    in. Ctrl+N, or the + after the last tab, opens an empty tab.
+  - Click a tab's name to show it, or press Ctrl+Tab (Ctrl+Shift+Tab goes back). A dot
+    on a tab means it has unsaved work.
+  - Ctrl+W, or the × on a tab, closes that tab and leaves the others open. Closing the
+    window asks about each tab with unsaved work, one after the other.
+  - Ctrl+N, Ctrl+W and Ctrl+Tab work wherever you are, even while typing in a box.
   - Drag the empty part of the tab strip to move the window.
   - Opening a drawing or project from Windows Explorer (double-click, or Open with) while
     PlanTint is already running opens it in a new tab of the open window.
   - Crash recovery is kept for each tab. After a crash, PlanTint offers the unsaved
     copies one at a time when it starts.
   - Every tab loads its own PDF engine, so several large drawings use more memory.
+
+  1.4.1 fixes two things in 1.4.0: the + button did nothing, and opening a drawing
+  replaced the one in the tab you were in.
 
   The project file format did not change in 1.4: projects from 1.0 to 1.3 open in 1.4.
 
@@ -175,4 +181,4 @@ LICENCES
   PlanTint uses Electron (MIT), MuPDF (AGPL-3.0), Clipper (Boost), UTIF (MIT),
   fflate (MIT), IBM Plex fonts (SIL OFL) and Lucide icons (ISC).
   Because MuPDF is AGPL, the complete source of this program is included in
-  PlanTint-1.4.0-source.zip.
+  PlanTint-1.4.1-source.zip.

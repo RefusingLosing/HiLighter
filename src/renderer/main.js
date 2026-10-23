@@ -8,7 +8,7 @@ import { initTools, setTool, TOOL_INFO, hintFor, updateCursor, setLock, deleteSe
 import { initPanel, zoomToIds } from './panel.js';
 import { h, icon, initTooltips, showMenu, toast, modalOpen, seg } from './ui.js';
 import { undo, redo, canUndo, canRedo, undoLabel, redoLabel, change } from './history.js';
-import { initIO, openFromDialog, openFile, save, saveAs, initCloseFlow, startRecovery, offerRecovery, isLoading, confirmDiscard, writeRecovery } from './io.js';
+import { initIO, openFromDialog, openFile, openDropped, save, saveAs, initCloseFlow, startRecovery, offerRecovery, isLoading, writeRecovery } from './io.js';
 import { detectColours, detectActive, detectApi, showHelp } from './dialogs.js';
 import { defaultLegend, legendRect, legendLayout, legendRows } from './legend.js';
 import { lengthUnitLabel, scaleSource, fmtScale, hasScale, scaleRatio } from './units.js';
@@ -326,10 +326,7 @@ function initDrop() {
     veil.classList.remove('show');
     const f = e.dataTransfer && e.dataTransfer.files[0];
     if (!f || modalOpen()) return;
-    if (!(await confirmDiscard('opening another drawing'))) return;
-    const p = window.plantint.pathForFile(f);
-    const bytes = new Uint8Array(await f.arrayBuffer());
-    openFile({ path: p || null, name: f.name, bytes }, true);
+    openDropped(f, window.plantint.pathForFile(f));
   });
 }
 

@@ -29,7 +29,8 @@ LAYOUT
   build.mjs          esbuild bundling, icon set, fonts, MuPDF files
 
 TESTS
-  test/run_all.sh runs everything on Linux. It needs xvfb, python3 with numpy, scipy,
+  test/run_all.sh runs everything on Linux. It needs xvfb, xdotool (t7 clicks and types with
+  the real mouse and keyboard; without it those checks are skipped), python3 with numpy, scipy,
   pillow, pypdfium2, pikepdf and reportlab, plus poppler-utils, ghostscript and qpdf.
   The first run draws the test drawings into testdata/out (testdata/*.py).
     test/harness/    runs the engine in Node to write PDFs without the interface

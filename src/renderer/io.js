@@ -59,11 +59,25 @@ export function initIO() {
 
 // ------------------------------------------------------------------ opening
 
+const canOpen = (name) => {
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  return ext === 'plantint' || ext === 'pdf' || IMG_EXT.includes(ext);
+};
+
+/** Ctrl+O and Open. A tab that already has a drawing keeps it: the main process opens the chosen file in a new tab. */
 export async function openFromDialog() {
   if (loading) return;
+  const f = await window.plantint.openDialog({ newTab: !!S.doc });
+  if (f) await openFile(f, true); // an empty tab takes the drawing in (or says what PlanTint opens)
+}
+
+/** A file dropped on the window: in a new tab beside this drawing, or here when this tab is empty. */
+export async function openDropped(file, filePath) {
+  if (loading) return;
+  if (!canOpen(file.name)) { await openFile({ path: filePath || null, name: file.name, bytes: null }, true); return; }
+  if (S.doc && filePath) { window.plantint.openInNewTab(filePath); return; }
   if (!(await confirmDiscard('opening another drawing'))) return;
-  const f = await window.plantint.openDialog();
-  if (f) await openFile(f, true);
+  await openFile({ path: filePath || null, name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) }, true);
 }
 
 export async function openFile(f, confirmed = false) {

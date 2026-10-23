@@ -1641,9 +1641,9 @@ function onKeyDown(e) {
   const k = e.key;
   const ctrl = e.ctrlKey || e.metaKey;
   if (ctrl && (k === 'o' || k === 'O')) { e.preventDefault(); hooks.open(); return; }
-  if (ctrl && !e.shiftKey && (k === 'n' || k === 'N')) { e.preventDefault(); window.plantint.newTab(); return; }
-  if (ctrl && (k === 'w' || k === 'W')) { e.preventDefault(); window.plantint.closeTab(); return; }
-  if (ctrl && k === 'Tab') { e.preventDefault(); window.plantint.switchTab(e.shiftKey ? -1 : 1); return; }
+  // Ctrl+N, Ctrl+W and Ctrl+Tab are tab keys. The main process takes them before they reach the page; keys sent
+  // by automation (the tests) skip that step and arrive here, so they are passed on.
+  if (ctrl && !e.altKey && (k === 'Tab' || (!e.shiftKey && /^[nw]$/i.test(k)))) { e.preventDefault(); window.plantint.tabKey(k === 'Tab' ? 'Tab' : k.toLowerCase(), e.shiftKey); return; }
   if (ctrl && (k === 's' || k === 'S')) { e.preventDefault(); hooks.save(e.shiftKey); return; }
   if (ctrl && !e.shiftKey && (k === 'z' || k === 'Z')) { e.preventDefault(); if (T.poly && T.poly.pts.length) { T.poly.pts.length -= 2; if (!T.poly.pts.length) T.poly = null; requestUI(); } else hooks.undo(); return; }
   if (ctrl && (k === 'y' || k === 'Y' || ((k === 'z' || k === 'Z') && e.shiftKey))) { e.preventDefault(); hooks.redo(); return; }

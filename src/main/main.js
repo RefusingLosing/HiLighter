@@ -2,7 +2,8 @@
 // PlanTint — Electron main process.
 // One window holds the drawings as tabs. Each tab is its own page with its own marking, scale,
 // measurements, unsaved-work question and crash-recovery copy. The strip across the top of the
-// window (tabs.html) lists the tabs, switches between them and opens new ones.
+// window (tabs.html) lists the tabs, switches between them and opens new ones. Opening a drawing
+// from a tab that already has one puts it in a new tab. The tab keys are handled here.
 
 const { app, BrowserWindow, WebContentsView, ipcMain, dialog, protocol, shell, screen, Menu } = require('electron');
 const crypto = require('crypto');
@@ -50,6 +51,7 @@ const focusedWindow = () => {
   const w = BrowserWindow.getFocusedWindow();
   return (w && wins.get(w.id)) || null;
 };
+const isOpenable = (p) => OPENABLE.includes(path.extname(p).toLowerCase());
 
 function fileFromArgv(argv) {
   for (const a of argv.slice(1)) {
@@ -116,7 +118,11 @@ function createWindow(startupPath = null) {
   });
   win.webContents.on('will-navigate', (e) => e.preventDefault());
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  win.on('resize', () => layout(rec));
+  // the shown tab fills the window under the strip: place it again whenever the window's size or state changes
+  for (const ev of ['resize', 'maximize', 'unmaximize', 'restore', 'enter-full-screen', 'leave-full-screen', 'show']) win.on(ev, () => layout(rec));
+  // back in the window (Alt+Tab, a closed dialog): the keys go to the shown drawing, not to the strip
+  win.on('focus', () => focusTab(rec.active));
+  win.webContents.on('before-input-event', (e, input) => tabKeys(rec, e, input));
   win.on('close', (e) => {
     if (rec.allowClose) return;
     e.preventDefault();
@@ -154,6 +160,7 @@ function addTab(rec, startupPath = null) {
   rec.tabs.push(t);
   wc.on('will-navigate', (e) => e.preventDefault());
   wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+  wc.on('before-input-event', (e, input) => tabKeys(rec, e, input));
   wc.on('render-process-gone', (_e, details) => {
     if (details.reason === 'clean-exit') return;
     activate(t);
@@ -184,12 +191,12 @@ function activate(t) {
   layout(rec);
   rec.win.setTitle(t.title);
   sendStrip(rec);
-  if (!t.view.webContents.isDestroyed()) t.view.webContents.focus();
+  focusTab(t);
 }
 
 /** Puts the shown tab under the strip, filling the rest of the window. */
 function layout(rec) {
-  if (!rec.active || rec.win.isDestroyed()) return;
+  if (!rec.active || rec.win.isDestroyed() || rec.win.isMinimized()) return;
   const [w, h] = rec.win.getContentSize();
   rec.active.view.setBounds({ x: 0, y: STRIP_H, width: w, height: Math.max(0, h - STRIP_H) });
 }
@@ -227,6 +234,37 @@ function askClose(t) {
 function requestCloseTab(t) {
   if (t.win.tabs.length === 1) { closeWindow(t.win); return; }
   askClose(t);
+}
+
+/** Gives the keys to a tab's drawing. */
+function focusTab(t) {
+  if (t && !t.view.webContents.isDestroyed()) t.view.webContents.focus();
+}
+
+/** Shows the next tab (dir 1) or the previous one (dir -1), going round. */
+function switchTab(rec, dir) {
+  if (rec.tabs.length < 2) return;
+  const i = rec.tabs.indexOf(rec.active);
+  activate(rec.tabs[(i + (dir < 0 ? -1 : 1) + rec.tabs.length) % rec.tabs.length]);
+}
+
+/** A tab key: 'n' (Ctrl+N, a new tab), 'w' (Ctrl+W, close the shown tab) or 'Tab' (Ctrl+Tab, next; with Shift, previous). */
+function tabKey(rec, k, shift, repeat = false) {
+  if (k === 'Tab') { switchTab(rec, shift ? -1 : 1); return true; }
+  if (k === 'n' && !shift) { if (!repeat) addTab(rec); return true; }
+  if (k === 'w' && !shift) { if (!repeat && rec.active) requestCloseTab(rec.active); return true; }
+  return false;
+}
+
+/**
+ * The tab keys act wherever they are pressed: in a drawing, in one of its text boxes, or in the strip,
+ * as in a browser. They are taken here, before the page sees them.
+ */
+function tabKeys(rec, e, input) {
+  if (input.type !== 'keyDown' || input.alt || !(input.control || input.meta)) return;
+  // the letter as typed, or the key's place when the keyboard is set to another script (Arabic, ...)
+  const letter = /^[a-z]$/i.test(input.key) ? input.key.toLowerCase() : /^Key[A-Z]$/.test(input.code) ? input.code.slice(3).toLowerCase() : '';
+  if (tabKey(rec, input.key === 'Tab' ? 'Tab' : letter, input.shift, input.isAutoRepeat)) e.preventDefault();
 }
 
 /** Closes the window: each tab is asked in turn, and the window goes when none is left. */
@@ -295,17 +333,17 @@ ipcMain.on('tabs:activate', (e, id) => {
   if (rec && t && t.win === rec) activate(t);
 });
 ipcMain.on('tabs:close', (_e, id) => { const t = tabs.get(id); if (t) requestCloseTab(t); });
-ipcMain.on('tabs:close-current', (e) => { const t = tabOf(e); if (t) requestCloseTab(t); });
-ipcMain.on('tabs:switch', (e, dir) => {
+// tab keys that did not pass through before-input-event (keys sent by automation, as in the tests) come from the page
+ipcMain.on('tabs:key', (e, k, shift) => { const rec = winOf(e); if (rec && typeof k === 'string') tabKey(rec, k, !!shift); });
+// a drawing dropped on a tab that already has one opens in a new tab beside it
+ipcMain.on('tabs:open', (e, p) => {
   const rec = winOf(e);
-  if (!rec || rec.tabs.length < 2) return;
-  const i = rec.tabs.indexOf(rec.active);
-  activate(rec.tabs[(i + (dir < 0 ? -1 : 1) + rec.tabs.length) % rec.tabs.length]);
+  if (rec && typeof p === 'string' && isOpenable(p)) addTab(rec, p);
 });
 
 // ---------------------------------------------------------------- IPC: a tab's page
 
-ipcMain.handle('dlg:open', async (e) => {
+ipcMain.handle('dlg:open', async (e, opts) => {
   const rec = winOf(e);
   if (!rec) return null;
   const r = await dialog.showOpenDialog(rec.win, {
@@ -319,7 +357,10 @@ ipcMain.handle('dlg:open', async (e) => {
     ],
   });
   if (r.canceled || !r.filePaths.length) return null;
-  return readForRenderer(r.filePaths[0]);
+  const p = r.filePaths[0];
+  // a tab that already has a drawing keeps it: the chosen one opens in a new tab beside it
+  if (opts && opts.newTab && isOpenable(p)) { addTab(rec, p); return null; }
+  return readForRenderer(p);
 });
 
 ipcMain.handle('fs:read', async (_e, p) => readForRenderer(p));

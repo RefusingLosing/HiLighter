@@ -2,7 +2,7 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('plantint', {
-  openDialog: () => ipcRenderer.invoke('dlg:open'),
+  openDialog: (opts) => ipcRenderer.invoke('dlg:open', opts),
   readFile: (p) => ipcRenderer.invoke('fs:read', p),
   saveDialog: (opts) => ipcRenderer.invoke('dlg:save', opts),
   writeFile: (p, bytes) => ipcRenderer.invoke('fs:write', p, bytes),
@@ -14,10 +14,10 @@ contextBridge.exposeInMainWorld('plantint', {
   quit: () => ipcRenderer.send('app:quit'),
   onCloseRequest: (cb) => ipcRenderer.on('app:close-request', () => cb()),
   closeCancel: () => ipcRenderer.send('app:close-cancel'),
-  // tabs: a new drawing, closing the shown one, switching, and the tab strip
+  // tabs (the main process handles Ctrl+N, Ctrl+W and Ctrl+Tab itself): the strip, and a drawing beside this one
   newTab: () => ipcRenderer.send('tabs:new'),
-  closeTab: () => ipcRenderer.send('tabs:close-current'),
-  switchTab: (dir) => ipcRenderer.send('tabs:switch', dir),
+  tabKey: (k, shift) => ipcRenderer.send('tabs:key', k, shift),
+  openInNewTab: (p) => ipcRenderer.send('tabs:open', p),
   tabsReady: () => ipcRenderer.send('tabs:ready'),
   activateTab: (id) => ipcRenderer.send('tabs:activate', id),
   closeTabById: (id) => ipcRenderer.send('tabs:close', id),
