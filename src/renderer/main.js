@@ -126,8 +126,7 @@ function buildTopbar() {
     h('div', { class: 'tb-spacer' }),
     h('div', { class: 'tb-group zoom' }, zoomOut, pct, zoomIn, fitBtn),
     h('div', { class: 'tb-sep' }),
-    helpBtn,
-    h('div', { class: 'wco-space' }));
+    helpBtn);
   const upd = () => {
     undoBtn.disabled = !canUndo();
     redoBtn.disabled = !canRedo();
@@ -306,7 +305,7 @@ function buildEmpty() {
       h('li', null, h('strong', null, 'Fill'), ' rooms with one click, or draw polygons and rectangles. Each one gets a name.'),
       h('li', null, h('strong', null, 'Measure'), ' areas, perimeters and dimensions (K) at the drawing’s scale, or calibrate it from a length you know (C).'),
       h('li', null, h('strong', null, 'Save'), ' with the legend as a PDF, a picture, or a project to edit later.')),
-    h('p', { class: 'empty-formats' }, 'Ctrl+O to open, Ctrl+N for a second window, F1 for every key.')));
+    h('p', { class: 'empty-formats' }, 'Ctrl+O to open, Ctrl+N for a new tab, F1 for every key.')));
   const upd = () => { el.hidden = !!S.doc; };
   on('docLoaded', upd);
   upd();
@@ -374,7 +373,7 @@ async function start() {
     ]);
   } catch { /* fonts are optional */ }
   requestAll();
-  // copies left by windows that are no longer open are offered one after another, until one is restored
+  // copies left by tabs that are no longer open are offered one after another, until one is restored
   let restored = false;
   for (let tries = 0; tries < 10 && !restored; tries++) {
     const r = await offerRecovery();

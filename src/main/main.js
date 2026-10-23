@@ -1,15 +1,17 @@
 'use strict';
 // PlanTint — Electron main process.
-// Owns the windows, native file dialogs, file IO and the close/save handshake with each window.
-// Every window is an independent drawing: its own page, marking, scale and crash-recovery copy.
+// One window holds the drawings as tabs. Each tab is its own page with its own marking, scale,
+// measurements, unsaved-work question and crash-recovery copy. The strip across the top of the
+// window (tabs.html) lists the tabs, switches between them and opens new ones.
 
-const { app, BrowserWindow, ipcMain, dialog, protocol, shell, screen, Menu } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, dialog, protocol, shell, screen, Menu } = require('electron');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 
 const RENDERER_DIR = path.join(__dirname, 'renderer');
 const OPENABLE = ['.pdf', '.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.gif', '.webp', '.plantint'];
+const STRIP_H = 44; // the tab strip is the row of the window buttons
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true, codeCache: true } },
@@ -31,14 +33,22 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
-// Per-window state, keyed by the window's id.
-//   key: names this window's crash-recovery copy; allowClose: set once the window may close;
-//   closeTimer: the "not responding" fallback; startupPath: a file to open when the window starts.
-const state = new Map();
-const windowOf = (e) => BrowserWindow.fromWebContents(e.sender);
-const stateOf = (e) => {
-  const w = windowOf(e);
-  return w ? state.get(w.id) || null : null;
+// Windows, keyed by window id: { win, tabs (in strip order), active (the shown tab), closing }.
+const wins = new Map();
+// Tabs, keyed by the id of their page: { win (its window record), view, key (recovery copy),
+// name, title, unsaved, attached (shown in the window), closeTimer, startupPath }.
+const tabs = new Map();
+
+const tabOf = (e) => tabs.get(e.sender.id) || null;
+const winOf = (e) => {
+  const t = tabOf(e);
+  if (t) return t.win;
+  const w = BrowserWindow.fromWebContents(e.sender);
+  return (w && wins.get(w.id)) || null;
+};
+const focusedWindow = () => {
+  const w = BrowserWindow.getFocusedWindow();
+  return (w && wins.get(w.id)) || null;
 };
 
 function fileFromArgv(argv) {
@@ -61,16 +71,15 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  // A second launch (for example a double-click on a drawing) opens its file in a window of its own.
-  // Without a file it brings the most recent window forward.
+  // A second launch (a drawing opened from Windows Explorer) opens its file as a new tab.
   app.on('second-instance', (_e, argv) => {
     app.whenReady().then(() => {
       const f = fileFromArgv(argv);
-      if (f) { createWindow(f); return; }
-      const w = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
-      if (!w) { createWindow(); return; }
-      if (w.isMinimized()) w.restore();
-      w.focus();
+      const rec = focusedWindow() || wins.values().next().value;
+      if (!rec) { createWindow(f); return; }
+      if (rec.win.isMinimized()) rec.win.restore();
+      rec.win.focus();
+      if (f) addTab(rec, f);
     });
   });
 }
@@ -86,7 +95,7 @@ function createWindow(startupPath = null) {
     title: 'PlanTint',
     icon: path.join(__dirname, 'icon.png'),
     titleBarStyle: 'hidden',
-    titleBarOverlay: { color: '#F3F4F1', symbolColor: '#2B302D', height: 44 },
+    titleBarOverlay: { color: '#F3F4F1', symbolColor: '#2B302D', height: STRIP_H },
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -97,57 +106,162 @@ function createWindow(startupPath = null) {
       backgroundThrottling: false,
     },
   });
-  const id = win.id;
-  const st = { key: 'w-' + crypto.randomUUID(), allowClose: false, closeTimer: null, startupPath };
-  state.set(id, st);
+  const winId = win.id;
+  const rec = { win, tabs: [], active: null, closing: false, allowClose: false };
+  wins.set(winId, rec);
 
   win.once('ready-to-show', () => {
     if (wa.width <= 1920) win.maximize();
     win.show();
   });
-
   win.webContents.on('will-navigate', (e) => e.preventDefault());
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-
+  win.on('resize', () => layout(rec));
   win.on('close', (e) => {
-    if (st.allowClose) return;
+    if (rec.allowClose) return;
     e.preventDefault();
-    win.webContents.send('app:close-request');
-    // If the page never answers (hung), fall back to a native question so the user can always leave.
-    clearTimeout(st.closeTimer);
-    st.closeTimer = setTimeout(() => {
-      const r = dialog.showMessageBoxSync(win, {
-        type: 'warning',
-        buttons: ['Close without saving', 'Keep waiting'],
-        defaultId: 1,
-        cancelId: 1,
-        title: 'PlanTint',
-        message: 'PlanTint is not responding.',
-        detail: 'Close the window anyway? Unsaved marking will be lost.',
-      });
-      if (r === 0) { st.allowClose = true; win.close(); }
-    }, 5000);
+    closeWindow(rec);
   });
+  win.on('closed', () => {
+    for (const t of rec.tabs) {
+      clearTimeout(t.closeTimer);
+      tabs.delete(t.view.webContents.id);
+      if (!t.view.webContents.isDestroyed()) t.view.webContents.close();
+    }
+    wins.delete(winId);
+  });
+  win.loadURL('app://bundle/tabs.html');
+  addTab(rec, startupPath);
+  return win;
+}
 
-  win.webContents.on('render-process-gone', (_e, details) => {
+/** Opens a drawing page in a new tab of the window and shows it. */
+function addTab(rec, startupPath = null) {
+  const view = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false,
+      backgroundThrottling: false,
+    },
+  });
+  view.setBackgroundColor('#F3F4F1');
+  const t = { win: rec, view, key: 'w-' + crypto.randomUUID(), name: '', title: 'PlanTint', unsaved: false, attached: false, closeTimer: null, startupPath };
+  const wc = view.webContents;
+  tabs.set(wc.id, t);
+  rec.tabs.push(t);
+  wc.on('will-navigate', (e) => e.preventDefault());
+  wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+  wc.on('render-process-gone', (_e, details) => {
     if (details.reason === 'clean-exit') return;
-    const r = dialog.showMessageBoxSync(win, {
+    activate(t);
+    const r = dialog.showMessageBoxSync(rec.win, {
       type: 'error',
-      buttons: ['Restart PlanTint', 'Close'],
+      buttons: ['Restart PlanTint', 'Close this drawing'],
       defaultId: 0,
       title: 'PlanTint',
       message: 'PlanTint stopped unexpectedly.',
       detail: 'Your last copy of unsaved work will be offered when it restarts.',
     });
-    if (r === 0) win.reload(); else { st.allowClose = true; win.close(); }
+    if (r === 0) { if (!wc.isDestroyed()) wc.reload(); } else removeTab(t);
   });
+  wc.loadURL('app://bundle/index.html');
+  activate(t);
+  return t;
+}
 
-  win.on('closed', () => {
-    clearTimeout(st.closeTimer);
-    state.delete(id);
-  });
-  win.loadURL('app://bundle/index.html');
-  return win;
+/** Shows one tab in the window (the others are taken out of the window, but stay alive). */
+function activate(t) {
+  const rec = t.win;
+  if (rec.win.isDestroyed()) return;
+  for (const o of rec.tabs) {
+    if (o !== t && o.attached) { rec.win.contentView.removeChildView(o.view); o.attached = false; }
+  }
+  if (!t.attached) { rec.win.contentView.addChildView(t.view); t.attached = true; }
+  rec.active = t;
+  layout(rec);
+  rec.win.setTitle(t.title);
+  sendStrip(rec);
+  if (!t.view.webContents.isDestroyed()) t.view.webContents.focus();
+}
+
+/** Puts the shown tab under the strip, filling the rest of the window. */
+function layout(rec) {
+  if (!rec.active || rec.win.isDestroyed()) return;
+  const [w, h] = rec.win.getContentSize();
+  rec.active.view.setBounds({ x: 0, y: STRIP_H, width: w, height: Math.max(0, h - STRIP_H) });
+}
+
+/** Tells the strip which tabs there are and which one is shown. */
+function sendStrip(rec) {
+  if (rec.win.isDestroyed() || rec.win.webContents.isDestroyed()) return;
+  rec.win.webContents.send('tabs:update', rec.tabs.map((t) => ({
+    id: t.view.webContents.id, name: t.name, unsaved: t.unsaved, active: t === rec.active,
+  })));
+}
+
+/** Asks a tab to close: it shows its unsaved-work question, then answers app:quit or app:close-cancel. */
+function askClose(t) {
+  if (t.view.webContents.isDestroyed()) return;
+  activate(t);
+  t.view.webContents.send('app:close-request');
+  // If the page never answers (hung), fall back to a native question so the user can always leave.
+  clearTimeout(t.closeTimer);
+  t.closeTimer = setTimeout(() => {
+    const r = dialog.showMessageBoxSync(t.win.win, {
+      type: 'warning',
+      buttons: ['Close without saving', 'Keep waiting'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'PlanTint',
+      message: 'PlanTint is not responding.',
+      detail: 'Close this drawing anyway? Unsaved marking will be lost.',
+    });
+    if (r === 0) removeTab(t);
+  }, 5000);
+}
+
+/** Closes one tab: the last tab closes the window. */
+function requestCloseTab(t) {
+  if (t.win.tabs.length === 1) { closeWindow(t.win); return; }
+  askClose(t);
+}
+
+/** Closes the window: each tab is asked in turn, and the window goes when none is left. */
+function closeWindow(rec) {
+  if (rec.closing) return;
+  rec.closing = true;
+  closeNext(rec);
+}
+
+function closeNext(rec) {
+  const t = rec.tabs[0];
+  if (!t) { closeWindowNow(rec); return; }
+  askClose(t);
+}
+
+function closeWindowNow(rec) {
+  rec.closing = false;
+  rec.allowClose = true;
+  if (!rec.win.isDestroyed()) rec.win.close();
+}
+
+/** Takes a tab out of its window and frees its page. */
+function removeTab(t) {
+  const rec = t.win;
+  clearTimeout(t.closeTimer);
+  const i = rec.tabs.indexOf(t);
+  if (i >= 0) rec.tabs.splice(i, 1);
+  tabs.delete(t.view.webContents.id);
+  if (t.attached && !rec.win.isDestroyed()) rec.win.contentView.removeChildView(t.view);
+  t.attached = false;
+  if (!t.view.webContents.isDestroyed()) t.view.webContents.close();
+  if (rec.closing) { closeNext(rec); return; }
+  if (!rec.tabs.length) { closeWindowNow(rec); return; }
+  if (rec.active === t) activate(rec.tabs[Math.min(Math.max(i, 0), rec.tabs.length - 1)]);
+  else sendStrip(rec);
 }
 
 app.whenReady().then(() => {
@@ -171,12 +285,30 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => app.quit());
 
-// ---------------------------------------------------------------- IPC
+// ---------------------------------------------------------------- IPC: the tab strip and new tabs
 
-ipcMain.on('window:new', () => createWindow());
+ipcMain.on('tabs:ready', (e) => { const rec = winOf(e); if (rec) sendStrip(rec); });
+ipcMain.on('tabs:new', (e) => { const rec = winOf(e); if (rec) addTab(rec); });
+ipcMain.on('tabs:activate', (e, id) => {
+  const rec = winOf(e);
+  const t = tabs.get(id);
+  if (rec && t && t.win === rec) activate(t);
+});
+ipcMain.on('tabs:close', (_e, id) => { const t = tabs.get(id); if (t) requestCloseTab(t); });
+ipcMain.on('tabs:close-current', (e) => { const t = tabOf(e); if (t) requestCloseTab(t); });
+ipcMain.on('tabs:switch', (e, dir) => {
+  const rec = winOf(e);
+  if (!rec || rec.tabs.length < 2) return;
+  const i = rec.tabs.indexOf(rec.active);
+  activate(rec.tabs[(i + (dir < 0 ? -1 : 1) + rec.tabs.length) % rec.tabs.length]);
+});
+
+// ---------------------------------------------------------------- IPC: a tab's page
 
 ipcMain.handle('dlg:open', async (e) => {
-  const r = await dialog.showOpenDialog(windowOf(e), {
+  const rec = winOf(e);
+  if (!rec) return null;
+  const r = await dialog.showOpenDialog(rec.win, {
     title: 'Open a drawing or project',
     properties: ['openFile'],
     filters: [
@@ -205,8 +337,10 @@ const KNOWN_EXT = ['.plantint', '.pdf', '.png', '.jpg', '.jpeg', '.xlsx', '.csv'
 
 /** Asks where to save one kind of file. The kind is chosen in the app before this. */
 ipcMain.handle('dlg:save', async (e, opts) => {
+  const rec = winOf(e);
+  if (!rec) return null;
   const f = SAVE_FILTERS[opts.type] || SAVE_FILTERS.plantint;
-  const r = await dialog.showSaveDialog(windowOf(e), {
+  const r = await dialog.showSaveDialog(rec.win, {
     title: opts.title || 'Save',
     defaultPath: opts.defaultPath,
     filters: [f],
@@ -240,37 +374,41 @@ ipcMain.handle('fs:write', async (_e, p, bytes) => {
 });
 
 ipcMain.handle('app:startup-file', async (e) => {
-  const st = stateOf(e);
-  if (!st || !st.startupPath) return null;
-  const p = st.startupPath;
-  st.startupPath = null;
+  const t = tabOf(e);
+  if (!t || !t.startupPath) return null;
+  const p = t.startupPath;
+  t.startupPath = null;
   try { return readForRenderer(p); } catch { return null; }
 });
 
-ipcMain.on('app:close-ack', (e) => {
-  const st = stateOf(e);
-  if (st) clearTimeout(st.closeTimer);
+ipcMain.on('app:close-ack', (e) => { const t = tabOf(e); if (t) clearTimeout(t.closeTimer); });
+ipcMain.on('app:close-cancel', (e) => {
+  const t = tabOf(e);
+  if (!t) return;
+  clearTimeout(t.closeTimer);
+  t.win.closing = false;
 });
-ipcMain.on('app:quit', (e) => {
-  const w = windowOf(e);
-  const st = w && state.get(w.id);
-  if (!w || !st) return;
-  clearTimeout(st.closeTimer);
-  st.allowClose = true;
-  w.close();
+ipcMain.on('app:quit', (e) => { const t = tabOf(e); if (t) removeTab(t); });
+ipcMain.on('app:set-title', (e, info) => {
+  const t = tabOf(e);
+  if (!t) return;
+  t.title = info.text;
+  t.name = info.name || '';
+  t.unsaved = !!info.unsaved;
+  if (t.win.active === t && !t.win.win.isDestroyed()) t.win.win.setTitle(t.title);
+  sendStrip(t.win);
 });
-ipcMain.on('app:set-title', (e, t) => { const w = windowOf(e); if (w) w.setTitle(t); });
 ipcMain.on('shell:show', (_e, p) => { try { shell.showItemInFolder(p); } catch { /* ignore */ } });
 ipcMain.handle('app:info', () => ({ version: app.getVersion(), platform: process.platform }));
 
-// ---- crash recovery: each window keeps a copy of its project in the user data folder
-// <key>.plantint is the project, <key>.json says its name and time. A copy whose window is no
-// longer open (the app closed or crashed) is offered to the next window that starts.
+// ---- crash recovery: each tab keeps a copy of its project in the user data folder
+// <key>.plantint is the project, <key>.json says its name and time. A copy whose tab is no longer
+// open (the app closed or crashed) is offered to the next drawing that starts.
 const recoveryDir = () => path.join(app.getPath('userData'), 'recovery');
-const recoveryKey = (e) => { const st = stateOf(e); return st ? st.key : null; };
+const keyOf = (e) => { const t = tabOf(e); return t ? t.key : null; };
 
 ipcMain.handle('recovery:write', async (e, bytes, meta) => {
-  const key = recoveryKey(e);
+  const key = keyOf(e);
   if (!key) return false;
   const d = recoveryDir();
   await fs.promises.mkdir(d, { recursive: true });
@@ -282,12 +420,12 @@ ipcMain.handle('recovery:write', async (e, bytes, meta) => {
 });
 
 ipcMain.handle('recovery:read', async (e) => {
-  const key = recoveryKey(e);
+  const key = keyOf(e);
   if (!key) return null;
   try {
     const d = recoveryDir();
-    // copies of windows that are still open belong to them; this window's own copy is restored after a reload
-    const live = new Set([...state.values()].map((s) => s.key));
+    // copies of tabs that are still open belong to them; this tab's own copy is restored after a reload
+    const live = new Set([...tabs.values()].map((t) => t.key));
     let best = null;
     for (const n of await fs.promises.readdir(d)) {
       if (!n.endsWith('.json')) continue;
@@ -300,7 +438,7 @@ ipcMain.handle('recovery:read', async (e) => {
     }
     if (!best) return null;
     if (best.id !== key) {
-      // take the copy over, so it belongs to this window and is cleared when this window saves or closes
+      // take the copy over, so it belongs to this tab and is cleared when this tab saves or closes
       await fs.promises.rename(path.join(d, best.id + '.plantint'), path.join(d, key + '.plantint'));
       await fs.promises.rename(path.join(d, best.id + '.json'), path.join(d, key + '.json'));
     }
@@ -310,7 +448,7 @@ ipcMain.handle('recovery:read', async (e) => {
 });
 
 ipcMain.handle('recovery:clear', async (e) => {
-  const key = recoveryKey(e);
+  const key = keyOf(e);
   if (!key) return true;
   for (const n of [key + '.plantint', key + '.plantint.part', key + '.json']) {
     try { await fs.promises.rm(path.join(recoveryDir(), n), { force: true }); } catch { /* ignore */ }

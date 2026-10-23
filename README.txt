@@ -1,20 +1,39 @@
-PlanTint 1.3
+PlanTint 1.4
 Highlighting and measuring for architectural and technical drawings.
 
 INSTALL
-  PlanTint-Setup-1.3.0.exe
+  PlanTint-Setup-1.4.0.exe
       Installs for your Windows user only (no admin rights needed), adds Start menu and
       desktop shortcuts, and opens .plantint project files when you double-click them.
-      Recommended. Installing over 1.0, 1.1 or 1.2 keeps your settings.
+      Recommended. Installing over an earlier version keeps your settings.
 
-  PlanTint-1.3.0-portable.exe
+  PlanTint-1.4.0-portable.exe
       One file, nothing installed. It unpacks itself each time, so it starts a few
       seconds slower than the installed version.
 
   The program is not code-signed, so Windows may show "Windows protected your PC".
   Click "More info", then "Run anyway".
 
-WHAT'S NEW IN 1.3: SEVERAL WINDOWS
+WHAT'S NEW IN 1.4: TABS
+  Work on several drawings at once. Each drawing is a tab in one window, like the tabs
+  of a browser. Each tab is its own drawing, with its own markings, scale, measurements
+  and unsaved-work question.
+
+  - Ctrl+N opens a new, empty tab. Ctrl+O loads a drawing or project into the tab you
+    are in. Click a tab's name to show it, or press Ctrl+Tab (Ctrl+Shift+Tab goes back).
+    A dot on a tab means it has unsaved work.
+  - Ctrl+W closes the tab you are in and leaves the others open. Closing the window asks
+    about each tab with unsaved work, one after the other.
+  - Drag the empty part of the tab strip to move the window.
+  - Opening a drawing or project from Windows Explorer (double-click, or Open with) while
+    PlanTint is already running opens it in a new tab of the open window.
+  - Crash recovery is kept for each tab. After a crash, PlanTint offers the unsaved
+    copies one at a time when it starts.
+  - Every tab loads its own PDF engine, so several large drawings use more memory.
+
+  The project file format did not change in 1.4: projects from 1.0 to 1.3 open in 1.4.
+
+WHAT'S NEW IN 1.3: SEVERAL WINDOWS (1.4 shows them as tabs)
   Work on more than one drawing at once. Each window is its own drawing, with its own
   markings, scale, measurements and unsaved-work question.
 
@@ -150,10 +169,10 @@ GOOD TO KNOW
   - If a fill would spill over most of the sheet, PlanTint asks before filling.
   - Pictures saved from PlanTint keep the drawing's resolution and print size.
   - Unsaved work is copied every 90 seconds and offered back after a crash.
-  - Projects saved by 1.0, 1.1 and 1.2 open in 1.3 (a scale typed in 1.1 is kept).
+  - Projects saved by 1.0 to 1.3 open in 1.4 (a scale typed in 1.1 is kept).
 
 LICENCES
   PlanTint uses Electron (MIT), MuPDF (AGPL-3.0), Clipper (Boost), UTIF (MIT),
   fflate (MIT), IBM Plex fonts (SIL OFL) and Lucide icons (ISC).
   Because MuPDF is AGPL, the complete source of this program is included in
-  PlanTint-1.3.0-source.zip.
+  PlanTint-1.4.0-source.zip.

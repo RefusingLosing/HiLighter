@@ -77,10 +77,6 @@ kbd { font: 11.5px var(--font); }
   font-variant-numeric: tabular-nums; cursor: pointer;
 }
 .zoom-pct:hover:not(:disabled) { border-color: var(--rule-2); }
-.wco-space {
-  flex: 0 0 auto; height: 1px;
-  width: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, calc(100vw - 140px)));
-}
 
 /* ---------------------------------------------------------------- workspace */
 

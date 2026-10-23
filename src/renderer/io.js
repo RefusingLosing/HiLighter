@@ -38,11 +38,11 @@ const baseName = (n) => String(n || 'Drawing').replace(/\.[^.]+$/, '');
 function setTitle() {
   const d = S.doc;
   const el = document.getElementById('doc-title');
-  if (!d) { window.plantint.setTitle('PlanTint'); if (el) el.innerHTML = ''; return; }
+  if (!d) { window.plantint.setTitle({ text: 'PlanTint', name: '', unsaved: false }); if (el) el.innerHTML = ''; return; }
   const st = saveState();
   const page = d.pageCount > 1 ? `page ${d.pageIndex + 1} of ${d.pageCount}` : '';
   const name = d.projectName || d.name;
-  window.plantint.setTitle(`${st === 'saved' ? '' : '• '}${name} — PlanTint`);
+  window.plantint.setTitle({ text: `${st === 'saved' ? '' : '• '}${name} — PlanTint`, name, unsaved: st !== 'saved' });
   if (el) {
     el.innerHTML = '';
     el.append(h('span', { class: 'dt-name', title: d.projectPath || d.path || name }, name));
@@ -190,7 +190,7 @@ async function buildProject() {
   }));
   const src = scaleSource();
   const meta = {
-    format: 'plantint', version: 3, app: 'PlanTint 1.3', saved: new Date().toISOString(),
+    format: 'plantint', version: 3, app: 'PlanTint 1.4', saved: new Date().toISOString(),
     source: {
       name: d.name, kind: d.kind, ext: d.ext, file: srcName, pageIndex: d.pageIndex, pageCount: d.pageCount,
       dpi: d.dpi, W: d.W, H: d.H, pageSizePt: d.pageSizePt, physical: d.physical,
@@ -434,8 +434,10 @@ export function initCloseFlow() {
         return;
       }
       const c = await askSave('closing');
-      if (c === 'discard') { await window.plantint.recoveryClear(); window.plantint.quit(); }
-      else if (c === 'save') { if ((await saveAs(null, true)) && saveState() !== 'unsaved') { await window.plantint.recoveryClear(); window.plantint.quit(); } }
+      if (c === 'discard') { await window.plantint.recoveryClear(); window.plantint.quit(); return; }
+      if (c === 'save' && (await saveAs(null, true)) && saveState() !== 'unsaved') { await window.plantint.recoveryClear(); window.plantint.quit(); return; }
+      // the tab stays open: the question was cancelled
+      window.plantint.closeCancel();
     } finally {
       closing = false;
     }

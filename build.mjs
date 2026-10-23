@@ -32,7 +32,7 @@ await esbuild.build({ ...common, entryPoints: [path.join(root, 'src/renderer/mai
 await esbuild.build({ ...common, entryPoints: [path.join(root, 'src/engine/engine.worker.js')], outfile: path.join(rOut, 'engine.worker.js'), external: ['./vendor/mupdf/mupdf.js'] });
 
 // ---- static files
-for (const f of ['index.html', 'styles.css']) fs.copyFileSync(path.join(root, 'src/renderer', f), path.join(rOut, f));
+for (const f of ['index.html', 'styles.css', 'tabs.html', 'tabs.css', 'tabs.js']) fs.copyFileSync(path.join(root, 'src/renderer', f), path.join(rOut, f));
 for (const f of ['mupdf.js', 'mupdf-wasm.js', 'mupdf-wasm.wasm']) fs.copyFileSync(path.join(root, 'node_modules/mupdf/dist', f), path.join(rOut, 'vendor/mupdf', f));
 fs.copyFileSync(path.join(root, 'src/main/main.js'), path.join(out, 'main.js'));
 fs.copyFileSync(path.join(root, 'src/main/preload.js'), path.join(out, 'preload.js'));

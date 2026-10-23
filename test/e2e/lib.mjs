@@ -15,6 +15,20 @@ fs.mkdirSync(OUT, { recursive: true });
 // where Electron keeps PlanTint's crash-recovery copy on Linux
 export const RECOVERY_DIR = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'PlanTint', 'recovery');
 
+/** The drawing pages of the app, in the order they were opened. The tab strip is a page of its own and is left out. */
+export const drawingPages = (app) => app.windows().filter((w) => /\/index\.html$/.test(w.url()));
+
+/** Waits for the first drawing page (each drawing is a tab in the window). */
+export async function drawingPage(app, timeout = 60000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeout) {
+    const p = drawingPages(app)[0];
+    if (p) return p;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error('no drawing page opened');
+}
+
 export async function launch(file, { clearRecovery = true } = {}) {
   if (clearRecovery) fs.rmSync(RECOVERY_DIR, { recursive: true, force: true });
   const app = await electron.launch({
@@ -23,7 +37,7 @@ export async function launch(file, { clearRecovery = true } = {}) {
     env: { ...process.env },
     timeout: 60000,
   });
-  const page = await app.firstWindow();
+  const page = await drawingPage(app);
   const errors = [];
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   page.on('pageerror', (e) => errors.push('pageerror: ' + (e.stack || e.message)));

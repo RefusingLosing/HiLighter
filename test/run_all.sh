@@ -12,7 +12,7 @@ printf '%-16s ' unit
 if node --no-warnings test/unit/measure_test.mjs > /tmp/plantint-unit.log 2>&1; then tail -1 /tmp/plantint-unit.log
 else echo "FAILED (see /tmp/plantint-unit.log)"; grep FAIL /tmp/plantint-unit.log; fails=$((fails+1)); fi
 node test/harness/pdf_export_test.mjs >/dev/null && python3 test/pdfcheck/check_basic.py | tail -1 && python3 test/pdfcheck/check_layers.py | tail -1 || fails=$((fails+1))
-for t in t0_regression t1_pdf_export t1b_sources t2_rect t3_linestyle t4_detect t5_eraser t6_measure t7_windows t8_recovery; do
+for t in t0_regression t1_pdf_export t1b_sources t2_rect t3_linestyle t4_detect t5_eraser t6_measure t7_tabs t8_recovery; do
   printf '%-16s ' "$t"
   if xvfb-run -a -s "-screen 0 1920x1080x24" node "test/e2e/$t.mjs" > "/tmp/plantint-$t.log" 2>&1; then
     tail -1 "/tmp/plantint-$t.log"
