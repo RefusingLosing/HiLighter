@@ -374,7 +374,13 @@ async function start() {
     ]);
   } catch { /* fonts are optional */ }
   requestAll();
-  const restored = await offerRecovery();
+  // copies left by windows that are no longer open are offered one after another, until one is restored
+  let restored = false;
+  for (let tries = 0; tries < 10 && !restored; tries++) {
+    const r = await offerRecovery();
+    if (r === 'none') break;
+    restored = r === 'restored';
+  }
   if (!restored) {
     const f = await window.plantint.startupFile();
     if (f) openFile(f, true);

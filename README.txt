@@ -1,18 +1,38 @@
-PlanTint 1.2
+PlanTint 1.3
 Highlighting and measuring for architectural and technical drawings.
 
 INSTALL
-  PlanTint-Setup-1.2.0.exe
+  PlanTint-Setup-1.3.0.exe
       Installs for your Windows user only (no admin rights needed), adds Start menu and
       desktop shortcuts, and opens .plantint project files when you double-click them.
-      Recommended. Installing over 1.0 or 1.1 keeps your settings.
+      Recommended. Installing over 1.0, 1.1 or 1.2 keeps your settings.
 
-  PlanTint-1.2.0-portable.exe
+  PlanTint-1.3.0-portable.exe
       One file, nothing installed. It unpacks itself each time, so it starts a few
       seconds slower than the installed version.
 
   The program is not code-signed, so Windows may show "Windows protected your PC".
   Click "More info", then "Run anyway".
+
+WHAT'S NEW IN 1.3: SEVERAL WINDOWS
+  Work on more than one drawing at once. Each window is its own drawing, with its own
+  markings, scale, measurements and unsaved-work question.
+
+  - Ctrl+N opens an empty window. Ctrl+O (or dropping a file on the window) loads a
+    drawing into the window you are in, so open each drawing in its own window to keep
+    them side by side.
+  - Opening a drawing or project from Windows Explorer (double-click, or Open with)
+    while PlanTint is already running opens it in a new window.
+  - Switch between windows with Alt+Tab or the taskbar. Each window's title shows its
+    file name.
+  - Closing a window asks only about its own drawing. The other windows stay open.
+  - Crash recovery is kept for each window. After a crash, PlanTint offers the unsaved
+    copies one at a time when it starts. A window that is still open never offers
+    another window's copy.
+  - Every window loads its own PDF engine, so several large drawings use more memory.
+
+  The project file format did not change: projects from 1.0, 1.1 and 1.2 open in 1.3,
+  and 1.3 projects open in 1.2.
 
 WHAT'S NEW IN 1.2: MEASURING
   Everything below is optional; turn each part on or off under Measurements in the side
@@ -130,10 +150,10 @@ GOOD TO KNOW
   - If a fill would spill over most of the sheet, PlanTint asks before filling.
   - Pictures saved from PlanTint keep the drawing's resolution and print size.
   - Unsaved work is copied every 90 seconds and offered back after a crash.
-  - Projects saved by 1.0 and 1.1 open in 1.2 (a scale typed in 1.1 is kept).
+  - Projects saved by 1.0, 1.1 and 1.2 open in 1.3 (a scale typed in 1.1 is kept).
 
 LICENCES
   PlanTint uses Electron (MIT), MuPDF (AGPL-3.0), Clipper (Boost), UTIF (MIT),
   fflate (MIT), IBM Plex fonts (SIL OFL) and Lucide icons (ISC).
   Because MuPDF is AGPL, the complete source of this program is included in
-  PlanTint-1.2.0-source.zip.
+  PlanTint-1.3.0-source.zip.

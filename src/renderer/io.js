@@ -190,7 +190,7 @@ async function buildProject() {
   }));
   const src = scaleSource();
   const meta = {
-    format: 'plantint', version: 3, app: 'PlanTint 1.2', saved: new Date().toISOString(),
+    format: 'plantint', version: 3, app: 'PlanTint 1.3', saved: new Date().toISOString(),
     source: {
       name: d.name, kind: d.kind, ext: d.ext, file: srcName, pageIndex: d.pageIndex, pageCount: d.pageCount,
       dpi: d.dpi, W: d.W, H: d.H, pageSizePt: d.pageSizePt, physical: d.physical,
@@ -462,9 +462,10 @@ export async function writeRecovery() {
   } catch { return false; }
 }
 
+/** Offers one crash-recovery copy. Returns 'none' (no copy), 'restored' or 'discarded'. */
 export async function offerRecovery() {
   const rec = await window.plantint.recoveryRead();
-  if (!rec) return false;
+  if (!rec) return 'none';
   const when = new Date(rec.meta.time);
   const c = await modal({
     title: 'Restore unsaved marking?',
@@ -474,8 +475,8 @@ export async function offerRecovery() {
   });
   if (c === 'restore') {
     try { await openProject(rec.bytes, null, rec.meta.name, true); } catch (err) { toast('The saved copy could not be restored: ' + err.message, { kind: 'error' }); }
-    return true;
+    return 'restored';
   }
   await window.plantint.recoveryClear();
-  return false;
+  return 'discarded';
 }
