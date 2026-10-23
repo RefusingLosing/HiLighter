@@ -1,6 +1,7 @@
 // Dialogs: page picker, painted-colour finder, save type chooser, keyboard help.
 
 import { S, emit, makeMarkup, uid } from './state.js';
+import { progressOn } from './progress.js';
 import { h, icon, modal, toast, seg } from './ui.js';
 import * as engine from './engine.js';
 import { snapshot, commit, runExclusive } from './history.js';
@@ -431,6 +432,8 @@ export const SAVE_TYPES = [
   { id: 'jpg', ext: 'jpg', icon: 'image', title: 'JPEG picture', text: 'Smaller file for sending; lines are slightly softer.' },
   { id: 'xlsx', ext: 'xlsx', icon: 'file-spreadsheet', schedule: true, title: 'Schedule (Excel)', text: 'Each markup with its area and perimeter, totals by colour, and the dimensions. Needs a scale.' },
   { id: 'csv', ext: 'csv', icon: 'file-spreadsheet', schedule: true, title: 'Schedule (CSV)', text: 'The same table as plain text, for any spreadsheet or database.' },
+  { id: 'progress', ext: 'xlsx', icon: 'chart-pie', schedule: true, title: 'Progress report (Excel)', text: 'Each zone with its status and % done, the % complete and totals by status.' },
+  { id: 'snags', ext: 'xlsx', icon: 'map-pin', schedule: true, title: 'Snag list (Excel)', text: 'Every snag pin with its number, place, trade, note, status, dates and photo.' },
 ];
 
 let lastType = null;
@@ -441,7 +444,9 @@ try { lastType = localStorage.getItem('plantint.saveType'); } catch { /* storage
  * is about keeping the marking (before closing), so schedules, which do not keep it, are left out.
  */
 export function chooseSaveType(defaultType, keepWork = false) {
-  const types = SAVE_TYPES.filter((t) => !keepWork || !t.schedule);
+  // the progress report and the snag list are offered once there is something to put in them
+  const inUse = { progress: progressOn() || S.markups.some((m) => m.prog), snags: S.pins.length > 0 };
+  const types = SAVE_TYPES.filter((t) => (!keepWork || !t.schedule) && inUse[t.id] !== false);
   let chosen = defaultType || lastType || 'plantint';
   if (!types.some((t) => t.id === chosen)) chosen = 'plantint';
   const list = h('div', { class: 'save-types', role: 'radiogroup' });
@@ -480,7 +485,8 @@ export function chooseSaveType(defaultType, keepWork = false) {
 
 export function showHelp() {
   const rows = [
-    ['Tools', [['S', 'Select and move'], ['F', 'Fill an enclosed area'], ['P', 'Polygon'], ['R', 'Rectangle'], ['G', 'Gap line (stops Fill at openings)'], ['K', 'Dimension'], ['C', 'Calibrate the scale'], ['I', 'Pick a colour'], ['E', 'Eraser (highlights and drawing colour)'], ['M', 'Magnifier'], ['L', 'Legend on sheet'], ['D', 'Find painted colour']]],
+    ['Tools', [['S', 'Select and move'], ['F', 'Fill an enclosed area'], ['P', 'Polygon'], ['R', 'Rectangle'], ['G', 'Gap line (stops Fill at openings)'], ['K', 'Dimension'], ['C', 'Calibrate the scale'], ['X', 'Snag pin'], ['I', 'Pick a colour'], ['E', 'Eraser (highlights and drawing colour)'], ['M', 'Magnifier'], ['L', 'Legend on sheet'], ['D', 'Find painted colour']]],
+    ['Progress map and snag pins', [['1 2 3 0', 'Selected zones: Not started, In progress, Done, Not counted (progress map on)'], ['1 2 3', 'Selected pins: Open, Fixed, Closed'], ['X, click', 'Drop a snag pin, then type its note'], ['Double-click a pin', 'Edit its note'], ['Ctrl+V', 'Paste a photo into the selected pin'], ['Drag a pin', 'Move it']]],
     ['Dimension (K) and Calibrate (C)', [['Click, click', 'The two points to measure between'], ['Click again', 'Where the dimension line goes (Enter: on the points)'], ['Shift', 'Horizontal or vertical'], ['Ctrl', 'Hold to stop snapping'], ['Backspace', 'Back one step'], ['Drag an end', 'Move a point of a selected dimension'], ['Drag the dot', 'Move the dimension line'], ['Calibrate', 'Click both ends of a known length, then type it']]],
     ['While drawing a polygon', [['H', 'Next edge horizontal'], ['V', 'Next edge vertical'], ['A', '90° to the last edge (press again for an earlier edge)'], ['Alt+click', 'Use an edge of another markup for 90°'], ['Shift', 'Horizontal or vertical, whichever is closer'], ['F8', 'Keep horizontal / vertical on'], ['Ctrl', 'Hold to stop snapping'], ['Enter', 'Close the polygon'], ['Backspace', 'Remove the last corner'], ['Esc', 'Cancel']]],
     ['Rectangle', [['Click, click', 'First corner, then the opposite corner'], ['Drag', 'Corner to corner'], ['Type a number', 'Exact width and height after the first corner'], ['Tab', 'Switch between width and height'], ['Shift', 'Keep it square'], ['Ctrl', 'Hold to stop snapping to walls and lines']]],
@@ -493,6 +499,6 @@ export function showHelp() {
     h('div', { class: 'help-grid' }, ...rows.map(([t, items]) => h('section', null,
       h('h3', null, t),
       h('dl', null, ...items.flatMap(([k, v]) => [h('dt', null, h('kbd', null, k)), h('dd', null, v)]))))),
-    h('p', { class: 'about' }, 'PlanTint 1.4.1. Built with Electron, MuPDF (AGPL), Clipper, UTIF, fflate, IBM Plex fonts (OFL) and Lucide icons (ISC). The full source is included with this copy.'));
+    h('p', { class: 'about' }, 'PlanTint 1.5.0. Built with Electron, MuPDF (AGPL), Clipper, UTIF, fflate, IBM Plex fonts (OFL) and Lucide icons (ISC). The full source is included with this copy.'));
   return modal({ title: 'Keys and mouse', body, wide: true, buttons: [{ label: 'Close', value: true, primary: true }] });
 }

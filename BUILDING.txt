@@ -19,7 +19,10 @@ LAYOUT
                      finder panel (dialogs.js), open/save/export (io.js), undo (history.js);
                      measuring: scale and units (units.js, scale.js), visible areas and
                      perimeters (measure.js), dimensions and area tags (annot.js),
-                     Excel and CSV schedules (schedule.js)
+                     Excel and CSV schedules (schedule.js); the progress map (progress.js,
+                     progresspanel.js), snag pins and their photos (pins.js, snagpanel.js),
+                     the Excel writer with pictures (xlsx.js) and the progress and snag
+                     reports (reports.js)
   src/engine/        a Web Worker that owns the drawing's pixels: renders PDFs with MuPDF,
                      decodes pictures, fill, painted-colour search (detect.js), colour
                      removal (imgproc.js unpaint), snapping (a PDF's own line geometry,
@@ -31,7 +34,7 @@ LAYOUT
 TESTS
   test/run_all.sh runs everything on Linux. It needs xvfb, xdotool (t7 clicks and types with
   the real mouse and keyboard; without it those checks are skipped), python3 with numpy, scipy,
-  pillow, pypdfium2, pikepdf and reportlab, plus poppler-utils, ghostscript and qpdf.
+  pillow, pypdfium2, pikepdf, reportlab and openpyxl, plus poppler-utils, ghostscript and qpdf.
   The first run draws the test drawings into testdata/out (testdata/*.py).
     test/harness/    runs the engine in Node to write PDFs without the interface
     test/pdfcheck/   renders PDFs with MuPDF, PDFium, Poppler and Ghostscript and compares
@@ -39,8 +42,10 @@ TESTS
                      exports with its PNG export; check_layers.py checks layer settings)
     test/e2e/        drives the built app with Playwright: t0 is the 1.0 behaviour, t1 to
                      t5 are the five 1.1 fixes (PDF export, rectangle guides, line styles,
-                     painted colour, eraser), t6 is measuring (1.2), t7 is tabs (1.4), t8 is crash recovery with several copies (1.3)
+                     painted colour, eraser), t6 is measuring (1.2), t7 is tabs (1.4), t8 is crash recovery with several copies (1.3),
+                     t9 is the progress map and snag pins (1.5; it reads the Excel reports with openpyxl)
     test/unit/       Node tests of units, typing lengths, visible areas and schedules
+                     (measure_test.mjs), and of progress, pins and the Excel writer (progress_test.mjs)
                      (check_annots.py checks dimensions and tags in exported PDFs)
   Set PLANTINT_TEST_OUT to choose where results go (default: the system temp folder), and
   PLANTINT_NO_BUILD=1 to test the build already in dist/app (for example the minified one
@@ -52,7 +57,11 @@ FILE FORMAT
   colour-removal step under ops/. Version 2 adds border line styles, the drawing scale
   and several paint colours per removal step. Version 3 adds the calibration (calib),
   measuring settings (meas), dimensions (dims) and dragged tag positions (tagAt); it still
-  writes scale/scaleSource so 1.1 reads the scale. Version 1 and 2 files open unchanged.
+  writes scale/scaleSource so 1.1 reads the scale. Version 4 adds the progress map
+  (progress: on, by, labels; and prog: st, pct, units on each markup), the snag pins (pins:
+  id, n, x, y, note, trade, status, photo, raised, closed; pinNext, the next number) and
+  their photos (photos: id, file, w, h), stored as JPEG files under photos/. Version 1 to 3
+  files open unchanged.
 
 LICENCE
   AGPL-3.0-or-later (because of MuPDF). See the licences in README.txt.

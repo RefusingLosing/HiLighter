@@ -4,6 +4,7 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 contextBridge.exposeInMainWorld('plantint', {
   openDialog: (opts) => ipcRenderer.invoke('dlg:open', opts),
   readFile: (p) => ipcRenderer.invoke('fs:read', p),
+  openPhoto: () => ipcRenderer.invoke('dlg:photo'),
   saveDialog: (opts) => ipcRenderer.invoke('dlg:save', opts),
   writeFile: (p, bytes) => ipcRenderer.invoke('fs:write', p, bytes),
   startupFile: () => ipcRenderer.invoke('app:startup-file'),

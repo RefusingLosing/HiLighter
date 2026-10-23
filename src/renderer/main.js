@@ -4,8 +4,11 @@ import { S, on, emit, setSelection, loadMeasPrefs } from './state.js';
 import * as engine from './engine.js';
 import { V, fit, zoomAt, setZoomPercent, zoomPercent } from './view.js';
 import { initRender, resize, requestAll, requestUI, setLoupeVisible, T, scheduleSharp } from './render.js';
-import { initTools, setTool, TOOL_INFO, hintFor, updateCursor, setLock, deleteSelected, duplicate, markupMenu, clearGaps, resetInteraction, rectWaiting } from './tools.js';
+import { initTools, setTool, TOOL_INFO, hintFor, updateCursor, setLock, deleteSelected, duplicate, markupMenu, clearGaps, resetInteraction, rectWaiting, paste, canPaste } from './tools.js';
 import { initPanel, zoomToIds } from './panel.js';
+import { selectedPins, pinSize, PIN_MIN_CSS } from './pins.js';
+import { progressSummary, progOf } from './progress.js';
+import { photoFile } from './snagpanel.js';
 import { h, icon, initTooltips, showMenu, toast, modalOpen, seg } from './ui.js';
 import { undo, redo, canUndo, canRedo, undoLabel, redoLabel, change } from './history.js';
 import { initIO, openFromDialog, openFile, openDropped, save, saveAs, initCloseFlow, startRecovery, offerRecovery, isLoading, writeRecovery } from './io.js';
@@ -143,7 +146,7 @@ function buildTopbar() {
 
 function buildRail() {
   const rail = $('rail');
-  const groups = [['select', 'hand'], ['fill', 'polygon', 'rect', 'gap'], ['dim', 'calib'], ['pick', 'erase']];
+  const groups = [['select', 'hand'], ['fill', 'polygon', 'rect', 'gap'], ['dim', 'calib'], ['pick', 'erase'], ['pin']];
   const btns = {};
   groups.forEach((g, gi) => {
     if (gi) rail.append(h('div', { class: 'rail-sep' }));
@@ -313,20 +316,60 @@ function buildEmpty() {
 
 // ------------------------------------------------------------------ drag and drop
 
+/** The snag pin a photo dropped or pasted now would go to: the one selected pin (with nothing else selected). */
+function photoPin() {
+  if (!S.doc || modalOpen()) return null;
+  const ps = selectedPins();
+  return ps.length === 1 && ps.length === S.selection.size ? ps[0] : null;
+}
+
 function initDrop() {
-  const veil = h('div', { class: 'drop-veil' }, h('div', null, 'Drop to open'));
+  const msg = h('div', null, 'Drop to open');
+  const veil = h('div', { class: 'drop-veil' }, msg);
   document.body.append(veil);
   let depth = 0;
+  // a picture dropped on the snag card is the photo of the selected pin; anywhere else a file opens
+  const onCard = (e) => {
+    const card = e.target && e.target.closest ? e.target.closest('#pin-card') : null;
+    return card && !card.hidden ? photoPin() : null;
+  };
   window.addEventListener('dragenter', (e) => { if (e.dataTransfer && [...e.dataTransfer.types].includes('Files')) { depth++; veil.classList.add('show'); e.preventDefault(); } });
   window.addEventListener('dragleave', () => { depth = Math.max(0, depth - 1); if (!depth) veil.classList.remove('show'); });
-  window.addEventListener('dragover', (e) => e.preventDefault());
+  window.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    const p = onCard(e);
+    const text = p ? `Drop to add the photo to snag ${p.n}` : 'Drop to open';
+    if (msg.textContent !== text) msg.textContent = text;
+    veil.classList.toggle('photo', !!p);
+  });
   window.addEventListener('drop', async (e) => {
     e.preventDefault();
     depth = 0;
     veil.classList.remove('show');
     const f = e.dataTransfer && e.dataTransfer.files[0];
     if (!f || modalOpen()) return;
+    if (onCard(e) && /^image\//.test(f.type || '') && (await photoFile(f))) return;
     openDropped(f, window.plantint.pathForFile(f));
+  });
+}
+
+// ------------------------------------------------------------------ paste
+
+/** Ctrl+V with one snag pin selected: a copied picture (a screenshot, a photo from another app) becomes its photo. */
+function initPaste() {
+  window.addEventListener('paste', async (e) => {
+    const p = photoPin();
+    if (!p) return;
+    // a text box takes what is pasted as usual; the pin's own note also takes a picture as its photo
+    const t = e.target;
+    const box = !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+    if (box && t.id !== 'pc-note') return;
+    const img = e.clipboardData ? [...e.clipboardData.files].find((f) => /^image\//.test(f.type || '')) : null;
+    if (img) { e.preventDefault(); await photoFile(img); return; }
+    if (box) return;
+    e.preventDefault();
+    if (canPaste()) paste();
+    else toast('Copy a photo or a screenshot first, then press Ctrl+V to add it to the pin.');
   });
 }
 
@@ -350,6 +393,7 @@ async function start() {
   initIO();
   initCloseFlow();
   initDrop();
+  initPaste();
   let first = true;
   const ro = new ResizeObserver(() => {
     const keepFit = S.doc && first;
@@ -382,7 +426,7 @@ async function start() {
     if (f) openFile(f, true);
   }
   startRecovery();
-  window.__plantint = { S, V, T, hooks, setTool, fit, emit, engine, legendRect, writeRecovery, measure, annot, units, legend: { legendLayout, legendRows, legendRect } }; // used by the automated tests
+  window.__plantint = { S, V, T, hooks, setTool, fit, emit, engine, legendRect, writeRecovery, measure, annot, units, legend: { legendLayout, legendRows, legendRect }, progress: { progressSummary, progOf }, pins: { pinSize, PIN_MIN_CSS } }; // used by the automated tests
 }
 
 start();

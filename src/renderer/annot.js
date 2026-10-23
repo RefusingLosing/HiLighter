@@ -11,6 +11,7 @@ import { S, ptToPx } from './state.js';
 import { lengthLabel, areaLabel, hasScale, realPerPx } from './units.js';
 import { measureAt, labelSpot } from './measure.js';
 import { hexToRgb, borderColorOf } from './colors.js';
+import { progressOn, progLabel, shown } from './progress.js';
 import * as G from './geom.js';
 
 export const ANNOT_FONT = '"IBM Plex Sans", "IBM Plex Sans Arabic", "Segoe UI", Arial, sans-serif';
@@ -125,25 +126,32 @@ export function offsetFor(d, x, y) {
 
 const tagCache = new WeakMap();
 
-/** Text lines of a markup's tag (area, perimeter). */
-export function tagLines(r) {
+const measTagsVisible = () => !!(S.meas.tags && hasScale() && (S.meas.showArea || S.meas.showPerim));
+const progressLabelsVisible = () => progressOn() && !!S.progress.labels;
+
+/** Text lines of a markup's tag: its % done on the progress map, then its area and perimeter. */
+export function tagLines(r, m = null) {
   const out = [];
-  if (S.meas.showArea) out.push(areaLabel(r.area));
-  if (S.meas.showPerim) out.push('P ' + lengthLabel(r.perim));
+  if (m && progressLabelsVisible()) out.push(progLabel(m));
+  if (measTagsVisible()) {
+    if (S.meas.showArea) out.push(areaLabel(r.area));
+    if (S.meas.showPerim) out.push('P ' + lengthLabel(r.perim));
+  }
   return out.filter(Boolean);
 }
 
-export const tagsVisible = () => !!(S.meas.tags && hasScale() && (S.meas.showArea || S.meas.showPerim));
+export const tagsVisible = () => measTagsVisible() || progressLabelsVisible();
 
 /** Tag of the markup at index i: { lines, cx, cy, w, h, fs, lineH, pad, color } or null. */
 export function tagLayout(i) {
   const m = S.markups[i];
   const r = measureAt(i);
   if (!r.vis.length || r.area <= 0) return null;
-  const key = stamp() + '|' + S.meas.showArea + S.meas.showPerim + '|' + S.meas.area + '|' + (m.tagAt ? m.tagAt.join(',') : '');
+  const prog = progressLabelsVisible() ? 'P' + progLabel(m) : progressOn() ? 'p' : '';
+  const key = stamp() + '|' + measTagsVisible() + S.meas.showArea + S.meas.showPerim + '|' + S.meas.area + '|' + prog + '|' + (m.tagAt ? m.tagAt.join(',') : '');
   const c = tagCache.get(m);
   if (c && c.r === r && c.key === key) return c.t;
-  const lines = tagLines(r);
+  const lines = tagLines(r, m);
   if (!lines.length) return null;
   const z = annotSizes();
   const ctx = mctx();
@@ -153,7 +161,7 @@ export function tagLayout(i) {
   const bw = w + pad * 2, bh = lineH * lines.length + pad * 1.2;
   const at = m.tagAt || labelSpot(r.vis, bw, bh);
   if (!at) return null;
-  const t = { id: m.id, lines, cx: at[0], cy: at[1], w: bw, h: bh, fs: z.fs, lineH, pad, color: borderColorOf(m), lw: Math.max(ptToPx(0.4), z.fs * 0.05) };
+  const t = { id: m.id, lines, cx: at[0], cy: at[1], w: bw, h: bh, fs: z.fs, lineH, pad, color: borderColorOf(shown(m)), lw: Math.max(ptToPx(0.4), z.fs * 0.05) };
   tagCache.set(m, { r, key, t });
   return t;
 }

@@ -3,7 +3,7 @@
 // the panel that scrolls).
 
 import { S, on, emit, withProps, selectedMarkups, setSelection, pxToPt, setMeas } from './state.js';
-import { h, icon, toast, showMenu } from './ui.js';
+import { h, icon, toast, showMenu, scrollWithin } from './ui.js';
 import { measureAt, totals } from './measure.js';
 import {
   LENGTH_UNITS, AREA_UNITS, hasScale, areaLabel, lengthLabel, fmtScale, scaleSource, lengthUnitLabel,
@@ -15,6 +15,10 @@ import { legendLimits, clampLegendSizes, bestLegendSpot } from './legend.js';
 import { requestScene, T, geo } from './render.js';
 import { zoomToRect } from './view.js';
 import { LINE_STYLES, dashFor } from '../shared/linestyle.js';
+import { progressOn, progLabel, shown } from './progress.js';
+import { buildProgress } from './progresspanel.js';
+import { buildSnags, buildPinCard, flushEdits } from './snagpanel.js';
+import { pinSize } from './pins.js';
 
 let els = {};
 let actions = {}; // provided by main: { setTool, toggleLegend, deleteSelected, duplicate, zoomTo, requestUI, markupMenu }
@@ -36,7 +40,16 @@ function sameAll(key) {
 }
 
 let txn = null;
+// with the progress map on, the sheet shows status colours: say so once when a colour is changed
+let progressHinted = false;
+function progressHint(props) {
+  if (progressHinted || !progressOn() || !['color', 'opacity', 'borderColor'].some((k) => k in props)) return;
+  progressHinted = true;
+  toast('The progress map is on, so the sheet shows each zone’s status colour. Your colours come back when you turn it off.', { timeout: 6000 });
+}
+
 function liveApply(label, props) {
+  progressHint(props);
   const t = target();
   if (t && t.length) {
     if (!txn) txn = { label, before: snapshot() };
@@ -53,6 +66,7 @@ function endLive() {
 }
 
 export function applyStyle(label, props) {
+  progressHint(props);
   const t = target();
   if (t && t.length) {
     change(label, () => {
@@ -173,7 +187,10 @@ export function initPanel(root, acts) {
   const listSec = h('section', { class: 'list-sec' }, listHead, h('div', { class: 'mk-scroll' }, list, empty));
 
   const measSec = buildMeasure();
-  root.append(card, legSec, measSec, listSec);
+  // the sections between the style card and the markup list scroll when they do not fit, so the card
+  // on top (style or snag pin) always shows and the list keeps its room
+  const mid = h('div', { class: 'panel-mid', id: 'panel-mid' }, legSec, measSec, buildProgress(actions), buildSnags(actions));
+  root.append(buildPinCard(actions), card, mid, listSec);
   els = { opRange, opVal, bdRange, bdVal, hexInput, pal, list, empty, legSwitch, legBody, legSec, styleSegs };
 
   list.addEventListener('keydown', (e) => {
@@ -436,7 +453,7 @@ function rowFor(m) {
     const del = h('button', { class: 'mk-btn del', 'data-tip': 'Delete', 'data-key': 'Del', 'aria-label': 'Delete', html: icon('trash-2', 15) });
     const meas = h('span', { class: 'mk-meas' });
     const el = h('div', { class: 'mk-row', role: 'option', 'data-id': m.id }, sw, name, meas, pen, loc, del);
-    r = { el, sw, name, meas, pen, loc, del, m: null, mt: '' };
+    r = { el, sw, name, meas, pen, loc, del, m: null, mt: '', pk: false };
     rowMap.set(m.id, r);
     const id = m.id;
     el.addEventListener('pointerdown', (e) => {
@@ -455,10 +472,12 @@ function rowFor(m) {
     loc.addEventListener('click', () => actions.zoomTo([id]));
     del.addEventListener('click', () => { setSelection([id]); actions.deleteSelected(); });
   }
-  if (r.m !== m) {
+  if (r.m !== m || r.pk !== progressOn()) {
     r.m = m;
-    r.sw.style.background = tintOnPaper(m.color, m.opacity);
-    if (m.borderPt > 0) { r.sw.style.border = `2px ${CSS_LINE[m.borderStyle] || 'solid'} ${borderColorOf(m)}`; r.sw.style.boxShadow = 'none'; }
+    r.pk = progressOn();
+    const sm = shown(m); // the status colour on the progress map
+    r.sw.style.background = tintOnPaper(sm.color, sm.opacity);
+    if (m.borderPt > 0) { r.sw.style.border = `2px ${CSS_LINE[m.borderStyle] || 'solid'} ${borderColorOf(sm)}`; r.sw.style.boxShadow = 'none'; }
     else { r.sw.style.border = '0'; r.sw.style.boxShadow = 'inset 0 0 0 1px rgba(0,0,0,0.18)'; }
     if (!r.el.querySelector('input')) r.name.textContent = m.name || 'Untitled';
     r.name.title = m.name || '';
@@ -467,6 +486,7 @@ function rowFor(m) {
 }
 
 function clickRow(id, e) {
+  flushEdits();
   const order = S.markups.map((m) => m.id);
   if (e.shiftKey && anchorId && order.includes(anchorId)) {
     const a = order.indexOf(anchorId), b = order.indexOf(id);
@@ -498,6 +518,8 @@ export function refreshList() {
       const q = measureAt(i);
       mt = [showA ? areaLabel(q.area) : '', showP ? 'P ' + lengthLabel(q.perim) : ''].filter(Boolean).join('\n');
     }
+    // on the progress map: the zone's % done first
+    if (progressOn()) mt = [progLabel(m) || 'Not counted', mt.split('\n')[0]].filter(Boolean).join('\n');
     if (mt !== r.mt) {
       r.mt = mt;
       r.meas.innerHTML = '';
@@ -520,14 +542,14 @@ export function refreshList() {
 
 export function revealInList(id) {
   const r = rowMap.get(id);
-  if (r) r.el.scrollIntoView({ block: 'nearest' });
+  if (r) scrollWithin(r.el.closest('.mk-scroll'), r.el);
 }
 
 export function startRename(id) {
   const r = rowMap.get(id);
   const m = S.markups.find((q) => q.id === id);
   if (!r || !m) return;
-  r.el.scrollIntoView({ block: 'nearest' });
+  scrollWithin(r.el.closest('.mk-scroll'), r.el);
   if (r.el.querySelector('input')) return;
   const input = h('input', { class: 'mk-input', value: m.name || '', maxlength: 120, spellcheck: 'false', 'aria-label': 'Markup name' });
   r.name.replaceWith(input);
@@ -554,9 +576,16 @@ export function startRename(id) {
 
 export function zoomToIds(ids) {
   const ms = S.markups.filter((m) => ids.includes(m.id));
-  if (!ms.length) return;
+  const ps = S.pins.filter((p) => ids.includes(p.id));
+  if (!ms.length && !ps.length) return;
   let b = [Infinity, Infinity, -Infinity, -Infinity];
   for (const m of ms) { const g = geo(m).bbox; b = [Math.min(b[0], g[0]), Math.min(b[1], g[1]), Math.max(b[2], g[2]), Math.max(b[3], g[3])]; }
+  if (ps.length) {
+    // snag pins: the whole pin, with room around a lone one so it is seen in its place
+    const z = pinSize();
+    const pad = ms.length ? 0 : Math.min(S.doc.W, S.doc.H) * 0.05;
+    for (const p of ps) b = [Math.min(b[0], p.x - z.r - pad), Math.min(b[1], p.y - z.tail - z.r - pad), Math.max(b[2], p.x + z.r + pad), Math.max(b[3], p.y + pad)];
+  }
   zoomToRect(b[0], b[1], b[2], b[3], 80);
   T.flash = { ids, until: performance.now() + 900 };
   requestScene();

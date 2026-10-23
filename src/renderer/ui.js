@@ -27,6 +27,14 @@ export function icon(name, size = 18, sw = 1.75) {
   return `<svg class="ico" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
 }
 
+/** Scrolls only `box` (not the window or other boxes around it) so that `el` shows, by the least amount. */
+export function scrollWithin(box, el) {
+  if (!box || !el || !box.contains(el)) return;
+  const b = box.getBoundingClientRect(), r = el.getBoundingClientRect();
+  if (r.height > b.height || r.top < b.top) box.scrollTop -= b.top - r.top;
+  else if (r.bottom > b.bottom) box.scrollTop += r.bottom - b.bottom;
+}
+
 export function iconEl(name, size, sw) {
   const s = document.createElement('span');
   s.className = 'ico-wrap';

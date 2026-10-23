@@ -10,6 +10,8 @@ import { drawLegend, legendRows, legendLayout } from './legend.js';
 import { dashFor } from '../shared/linestyle.js';
 import { lengthLabel } from './units.js';
 import { drawAnnots, drawDim, dimLayout, tagLayout, tagsVisible } from './annot.js';
+import { shown } from './progress.js';
+import { drawPin, pinSize, PIN_MIN_CSS } from './pins.js';
 import * as engine from './engine.js';
 
 export const BOARD = '#5E6862';
@@ -114,6 +116,7 @@ export const T = {
   tagEdit: null,         // an area tag being dragged: { id, at }
   hoverDimId: null,
   hoverTagId: null,
+  hoverPinId: null,
   hoverDimHandle: null,  // 'a' | 'b' | 'off'
 };
 
@@ -221,10 +224,11 @@ function drawMarkups(o, v) {
   o.globalCompositeOperation = 'source-over';
   o.clearRect(0, 0, w, h);
   const [vx0, vy0, vx1, vy1] = visRect(v);
-  for (const m of S.markups) {
-    const g = geo(m);
+  for (const m0 of S.markups) {
+    const m = shown(m0); // its status colour on the progress map
+    const g = geo(m0);
     let path = g.path, bb = g.bbox;
-    if (T.vertexEdit && T.vertexEdit.id === m.id) { path = pathFromRings(T.vertexEdit.rings); bb = ringsBBox(T.vertexEdit.rings); }
+    if (T.vertexEdit && T.vertexEdit.id === m0.id) { path = pathFromRings(T.vertexEdit.rings); bb = ringsBBox(T.vertexEdit.rings); }
     let dx = 0, dy = 0;
     if (T.moveIds && T.moveIds.has(m.id)) { dx = T.moveDx; dy = T.moveDy; }
     const bw = m.borderPt > 0 ? ptToPx(m.borderPt) : 0;
@@ -330,6 +334,17 @@ export function drawScene(ctx, v, octx, isLoupe) {
     ctx.save();
     ctx.setTransform(v.scale, 0, 0, v.scale, v.tx, v.ty);
     drawLegend(ctx, Lp, rows, lay);
+    ctx.restore();
+  }
+  // snag pins: on top of everything (they print)
+  if (S.pins.length) {
+    ctx.save();
+    ctx.setTransform(v.scale, 0, 0, v.scale, v.tx, v.ty);
+    const z = pinSize((PIN_MIN_CSS * v.dpr) / v.scale);
+    for (const p of S.pins) {
+      const mv = T.moveIds && T.moveIds.has(p.id);
+      drawPin(ctx, p, z, mv ? T.moveDx : 0, mv ? T.moveDy : 0);
+    }
     ctx.restore();
   }
 }
@@ -592,6 +607,25 @@ export function drawUI(ctx, v, isLoupe) {
           handle(ctx, x, y, d, hot ? BLUE : '#FFFFFF', BLUE, hot ? 9 : 7);
         }
       });
+    }
+  }
+  // snag pins: a ring round the head of selected and hovered pins
+  if (S.pins.length) {
+    const z = pinSize((PIN_MIN_CSS * v.dpr) / v.scale);
+    for (const p of S.pins) {
+      const sel_ = S.selection.has(p.id), hov = T.hoverPinId === p.id && !T.moveIds;
+      if (!sel_ && !hov) continue;
+      const mv = T.moveIds && T.moveIds.has(p.id);
+      const [X, Y] = sp(p.x + (mv ? T.moveDx : 0), p.y - z.tail + (mv ? T.moveDy : 0));
+      const R = (z.r + z.lw) * v.scale + 3 * d;
+      ctx.save();
+      ctx.lineWidth = 4 * d;
+      ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+      ctx.beginPath(); ctx.arc(X, Y, R, 0, Math.PI * 2); ctx.stroke();
+      ctx.lineWidth = (sel_ ? 2 : 1.5) * d;
+      ctx.strokeStyle = sel_ ? BLUE : 'rgba(36,87,197,0.6)';
+      ctx.stroke();
+      ctx.restore();
     }
   }
   if (S.legendSelected && S.legend && S.legend.visible) {

@@ -40,8 +40,19 @@ export function saveMeasPrefs(m) {
   try { localStorage.setItem('plantint.meas', JSON.stringify(m)); } catch { /* storage is optional */ }
 }
 
+/**
+ * Progress map settings (saved with the project). on: the sheet shows each zone in its status
+ * colour; by: what % complete is weighted by ('area' or 'units'); labels: each zone's % on the sheet.
+ * A zone's own status is markup.prog (see progress.js).
+ */
+export const PROGRESS_DEFAULT = Object.freeze({ on: false, by: 'area', labels: true });
+
 export const S = {
   doc: null,            // see io.js: { name, path, kind, ext, bytes, pageIndex, pageCount, dpi, W, H, pageSizePt, text, paper, scale, projectPath }
+  progress: PROGRESS_DEFAULT,
+  pins: [],             // snag pins: [{ id, n, x, y, note, trade, status, photo, raised, closed }] (sheet pixels), see pins.js
+  pinNext: 1,           // the next pin number: numbers are never given twice
+  photos: new Map(),    // snag photos by id: { bytes (JPEG), w, h }. Kept out of undo; saved with the project.
   markups: [],
   gaps: [],
   dims: [],             // dimension lines: [{ id, a: [x, y], b: [x, y], off }] (sheet pixels)
@@ -49,7 +60,7 @@ export const S = {
   rasterOps: [],        // [{ id, label }] colour taken out of the drawing (pixel data lives in the engine)
   calib: null,          // the drawing's scale when set here: { kind: 'calib'|'typed', mPerPx, a, b, lengthM, unit }
   meas: MEAS_DEFAULT,   // measuring settings, see MEAS_DEFAULT
-  selection: new Set(), // markup and dimension ids
+  selection: new Set(), // markup, dimension and pin ids
   legendSelected: false,
   tool: 'select',
   style: { color: '#FFD60A', opacity: 0.45, borderPt: 0, borderColor: null, borderStyle: 'solid' },
@@ -103,6 +114,7 @@ export function withProps(m, props) {
 // ------------------------------------------------------------------ dimension helpers
 
 export const isDimId = (id) => typeof id === 'string' && id[0] === 'd';
+export const isPinId = (id) => typeof id === 'string' && id[0] === 'p';
 export const selectedDims = () => S.dims.filter((d) => S.selection.has(d.id));
 
 export function makeDim(a, b, off = 0) {

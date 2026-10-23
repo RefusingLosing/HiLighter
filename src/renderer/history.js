@@ -13,7 +13,10 @@ let savedId = 0;         // state last saved in any form (project or picture)
 let projectSavedId = 0;  // state last saved as an editable project
 let busy = Promise.resolve();
 
-export const snapshot = () => ({ markups: S.markups, gaps: S.gaps, legend: S.legend, ops: S.rasterOps, dims: S.dims, meas: S.meas, calib: S.calib });
+export const snapshot = () => ({
+  markups: S.markups, gaps: S.gaps, legend: S.legend, ops: S.rasterOps, dims: S.dims, meas: S.meas, calib: S.calib,
+  pins: S.pins, pinNext: S.pinNext, progress: S.progress,
+});
 
 const currentId = () => (undoStack.length ? undoStack[undoStack.length - 1].id : 0);
 export const stateId = currentId;
@@ -48,7 +51,8 @@ export function resetHistory() {
 
 function sameSnap(a, b) {
   return a.markups === b.markups && a.gaps === b.gaps && a.legend === b.legend && a.ops === b.ops
-    && a.dims === b.dims && a.meas === b.meas && a.calib === b.calib;
+    && a.dims === b.dims && a.meas === b.meas && a.calib === b.calib
+    && a.pins === b.pins && a.pinNext === b.pinNext && a.progress === b.progress;
 }
 
 function opsIn(entries) {
@@ -106,8 +110,11 @@ async function applySnapshot(t) {
   S.dims = t.dims;
   S.meas = t.meas;
   S.calib = t.calib;
+  S.pins = t.pins;
+  S.pinNext = t.pinNext;
+  S.progress = t.progress;
   if (gapsChanged) await engine.call('setGaps', { lines: S.gaps.map((g) => g.pts) });
-  const ids = new Set([...S.markups.map((m) => m.id), ...S.dims.map((d) => d.id)]);
+  const ids = new Set([...S.markups.map((m) => m.id), ...S.dims.map((d) => d.id), ...S.pins.map((p) => p.id)]);
   S.selection = new Set([...S.selection].filter((id) => ids.has(id)));
   if (!S.legend || !S.legend.visible) S.legendSelected = false;
   emit('selection');

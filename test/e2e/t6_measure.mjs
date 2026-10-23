@@ -370,7 +370,7 @@ print(json.dumps({'head': rows[0], 'r1': rows[1], 'total': total, 'totalf': rows
     while (!fs.existsSync(proj) && Date.now() - t0 < 30000) await page.waitForTimeout(150);
     await page.waitForTimeout(400);
     const meta = JSON.parse(strFromU8(unzipSync(new Uint8Array(fs.readFileSync(proj)))['project.json']));
-    check(meta.version === 3 && meta.dims.length === 3 && meta.calib && meta.calib.kind === 'calib' && meta.meas.tags === true && meta.scale === 50, `project keeps dimensions, calibration and settings (v${meta.version}, scale ${meta.scale} for 1.1)`, R);
+    check(meta.version === 4 && meta.dims.length === 3 && meta.calib && meta.calib.kind === 'calib' && meta.meas.tags === true && meta.scale === 50, `project keeps dimensions, calibration and settings (v${meta.version}, scale ${meta.scale} for 1.1)`, R);
     // a 1.1 project with a typed scale opens as a typed scale
     const files = unzipSync(new Uint8Array(fs.readFileSync(proj)));
     const old = { ...meta, version: 2, app: 'PlanTint 1.1', scale: 100, scaleSource: 'user' };

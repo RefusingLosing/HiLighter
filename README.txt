@@ -1,18 +1,63 @@
-PlanTint 1.4.1
+PlanTint 1.5.0
 Highlighting and measuring for architectural and technical drawings.
 
 INSTALL
-  PlanTint-Setup-1.4.1.exe
+  PlanTint-Setup-1.5.0.exe
       Installs for your Windows user only (no admin rights needed), adds Start menu and
       desktop shortcuts, and opens .plantint project files when you double-click them.
       Recommended. Installing over an earlier version keeps your settings.
 
-  PlanTint-1.4.1-portable.exe
+  PlanTint-1.5.0-portable.exe
       One file, nothing installed. It unpacks itself each time, so it starts a few
       seconds slower than the installed version.
 
   The program is not code-signed, so Windows may show "Windows protected your PC".
   Click "More info", then "Run anyway".
+
+WHAT'S NEW IN 1.5: PROGRESS MAP AND SNAG PINS
+  1. Progress map.
+     Turn on Progress map in the side panel and every zone shows the colour of its
+     status: red Not started, amber In progress, green Done, grey Not counted. Your own
+     colours come back when you turn it off.
+     - Select zones, then click a status in the panel or press 1 (Not started),
+       2 (In progress), 3 (Done) or 0 (Not counted). Right-click a zone for the same.
+       A zone in progress gets a "% done" slider; it starts at 50%.
+     - The panel shows the % complete with a bar and how many zones have each status.
+       "Count by Area" weighs each zone by its visible area. "Count by Units" weighs each
+       zone by a number you give it, for example 3 for a zone with three play areas.
+       Zones not counted (a cancelled item, say) are left out of every total.
+     - "% on sheet" writes each zone's % inside it; drag a label to move it. It prints.
+     - With the legend on (L), the legend becomes the progress table: each status with
+       its zones, their area or units and share, and the % complete.
+     - "Progress report…" (or Save as) writes an Excel workbook: every zone with its
+       status, % done and area or units, the % complete and the totals by status. The
+       totals are formulas, so changing a status or a % in Excel updates them.
+     - Statuses, % and units are saved with the project, and every change can be undone.
+
+  2. Snag pins (X).
+     Press X and click where a defect is: a numbered pin drops there, ready for you to
+     type what is wrong (Enter to finish). A number is never given twice, even after its
+     pin is deleted, so a list sent out earlier stays right.
+     - The card at the top of the side panel edits the selected pin: its status (Open,
+       Fixed, Closed; keys 1, 2, 3), trade (Civil, Mechanical, Electrical, Firefighting,
+       Landscape, Other, or type your own), note and photo. Closing a pin dates it.
+     - Photos: "Add photo…" picks a file, Ctrl+V pastes a copied picture or screenshot,
+       or drag a photo from Explorer onto the card. Photos are turned upright, kept at up
+       to 1600 pixels and stored inside the project file.
+     - Drag a pin to move it. Double-click it to edit its note. Right-click it for its
+       status, photo, zoom and delete. Pins undo, select (Ctrl+A, dragging a box) and
+       move together with the other markings.
+     - The Snags section lists every pin with its note, trade and the zone it is in.
+       Click one to find it on the sheet; filter by status.
+     - Pins print in PDFs and pictures, on top of everything else. They are as big as
+       the text size set under Measurements.
+     - "Snag list…" (or Save as) writes an Excel workbook: number, location (the zone the
+       pin is in), trade, description, status, the dates raised and closed, and the photo
+       in its row. A second sheet counts the snags by trade and status.
+
+  Projects saved by 1.5 keep the progress map, the pins and their photos (project
+  format 4). Projects from 1.0 to 1.4 open in 1.5. Opened in 1.4, a 1.5 project shows
+  its markings without the statuses and pins.
 
 WHAT'S NEW IN 1.4: TABS
   Work on several drawings at once. Each drawing is a tab in one window, like the tabs
@@ -166,6 +211,8 @@ FIRST STEPS
   4. Press L to place the legend, then Ctrl+S to save. Save asks for the kind of file
      (PlanTint project, PDF, flattened PDF, PNG, JPEG, or an Excel or CSV schedule) and
      then where to put it.
+  5. On site: turn on the Progress map to colour zones by status, and drop snag pins (X)
+     with notes and photos. Both have their own Excel report.
   Press F1 inside PlanTint to see every key.
 
 GOOD TO KNOW
@@ -175,10 +222,10 @@ GOOD TO KNOW
   - If a fill would spill over most of the sheet, PlanTint asks before filling.
   - Pictures saved from PlanTint keep the drawing's resolution and print size.
   - Unsaved work is copied every 90 seconds and offered back after a crash.
-  - Projects saved by 1.0 to 1.3 open in 1.4 (a scale typed in 1.1 is kept).
+  - Projects saved by 1.0 to 1.4 open in 1.5 (a scale typed in 1.1 is kept).
 
 LICENCES
   PlanTint uses Electron (MIT), MuPDF (AGPL-3.0), Clipper (Boost), UTIF (MIT),
   fflate (MIT), IBM Plex fonts (SIL OFL) and Lucide icons (ISC).
   Because MuPDF is AGPL, the complete source of this program is included in
-  PlanTint-1.4.1-source.zip.
+  PlanTint-1.5.0-source.zip.

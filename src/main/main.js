@@ -365,6 +365,19 @@ ipcMain.handle('dlg:open', async (e, opts) => {
 
 ipcMain.handle('fs:read', async (_e, p) => readForRenderer(p));
 
+/** A photo for a snag pin. */
+ipcMain.handle('dlg:photo', async (e) => {
+  const rec = winOf(e);
+  if (!rec) return null;
+  const r = await dialog.showOpenDialog(rec.win, {
+    title: 'Add a photo to the snag',
+    properties: ['openFile'],
+    filters: [{ name: 'Photos', extensions: ['jpg', 'jpeg', 'png', 'webp', 'bmp', 'gif'] }],
+  });
+  if (r.canceled || !r.filePaths.length) return null;
+  return readForRenderer(r.filePaths[0]);
+});
+
 const SAVE_FILTERS = {
   plantint: { name: 'PlanTint project', extensions: ['plantint'] },
   pdf: { name: 'PDF document', extensions: ['pdf'] },
@@ -372,6 +385,8 @@ const SAVE_FILTERS = {
   png: { name: 'PNG picture', extensions: ['png'] },
   jpg: { name: 'JPEG picture', extensions: ['jpg', 'jpeg'] },
   xlsx: { name: 'Excel workbook', extensions: ['xlsx'] },
+  progress: { name: 'Excel workbook', extensions: ['xlsx'] },
+  snags: { name: 'Excel workbook', extensions: ['xlsx'] },
   csv: { name: 'CSV (comma separated)', extensions: ['csv'] },
 };
 const KNOWN_EXT = ['.plantint', '.pdf', '.png', '.jpg', '.jpeg', '.xlsx', '.csv'];

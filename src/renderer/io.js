@@ -1,7 +1,7 @@
 // Opening drawings and projects, saving, exporting, the exit question and crash recovery.
 
 import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate';
-import { S, emit, on, ptToPx, loadMeasPrefs, MEAS_DEFAULT } from './state.js';
+import { S, emit, on, ptToPx, loadMeasPrefs, MEAS_DEFAULT, PROGRESS_DEFAULT } from './state.js';
 import * as engine from './engine.js';
 import { resetTiles, requestAll, geo } from './render.js';
 import { fit } from './view.js';
@@ -15,6 +15,9 @@ import { detectScale, scaleRatio, scaleSource, hasScale, isLengthUnit, isAreaUni
 import * as G from './geom.js';
 import { annotExport } from './annot.js';
 import { scheduleXlsx, scheduleCsv } from './schedule.js';
+import { shown, readProg } from './progress.js';
+import { pinExport, readPin } from './pins.js';
+import { progressXlsx, snagXlsx } from './reports.js';
 
 const IMG_EXT = ['png', 'jpg', 'jpeg', 'tif', 'tiff', 'bmp', 'gif', 'webp'];
 const MAX_IMAGE_PX = 100e6;
@@ -105,6 +108,10 @@ function setDoc(doc) {
   S.rasterOps = [];
   S.calib = null;
   S.meas = loadMeasPrefs();
+  S.progress = PROGRESS_DEFAULT;
+  S.pins = [];
+  S.pinNext = 1;
+  S.photos = new Map();
   S.selection = new Set();
   S.legendSelected = false;
   resetHistory();
@@ -203,8 +210,11 @@ async function buildProject() {
     }),
   }));
   const src = scaleSource();
+  // photos of the pins (stored JPEGs, kept as they are)
+  const photoIds = [...new Set(S.pins.map((p) => p.photo).filter((id) => id && S.photos.has(id)))];
+  for (const id of photoIds) files[`photos/${id}.jpg`] = [S.photos.get(id).bytes, { level: 0 }];
   const meta = {
-    format: 'plantint', version: 3, app: 'PlanTint 1.4', saved: new Date().toISOString(),
+    format: 'plantint', version: 4, app: 'PlanTint 1.5', saved: new Date().toISOString(),
     source: {
       name: d.name, kind: d.kind, ext: d.ext, file: srcName, pageIndex: d.pageIndex, pageCount: d.pageCount,
       dpi: d.dpi, W: d.W, H: d.H, pageSizePt: d.pageSizePt, physical: d.physical,
@@ -218,6 +228,7 @@ async function buildProject() {
       borderPt: m.borderPt, borderColor: m.borderColor, borderStyle: m.borderStyle || 'solid',
       rings: m.rings.map((r) => r.map(round2)),
       ...(m.tagAt ? { tagAt: m.tagAt.map(round2) } : {}),
+      ...(m.prog ? { prog: { ...m.prog } } : {}),
     })),
     gaps: S.gaps.map((g) => ({ id: g.id, pts: g.pts.map(round2) })),
     dims: S.dims.map((q) => ({ id: q.id, a: q.a.map(round2), b: q.b.map(round2), off: round2(q.off || 0) })),
@@ -225,6 +236,14 @@ async function buildProject() {
     style: S.style,
     fill: S.fill,
     ops,
+    // 1.5: the progress map and snag pins
+    progress: { ...S.progress },
+    pins: S.pins.map((p) => ({
+      id: p.id, n: p.n, x: round2(p.x), y: round2(p.y), note: p.note, trade: p.trade, status: p.status,
+      photo: p.photo && photoIds.includes(p.photo) ? p.photo : null, raised: p.raised, closed: p.closed,
+    })),
+    pinNext: S.pinNext,
+    photos: photoIds.map((id) => ({ id, file: `photos/${id}.jpg`, w: S.photos.get(id).w, h: S.photos.get(id).h })),
   };
   files['project.json'] = strToU8(JSON.stringify(meta));
   files[srcName] = [d.bytes, { level: 0 }];
@@ -269,7 +288,20 @@ async function openProject(bytes, path, name, restored = false) {
       borderPt: m.borderPt || 0, borderColor: m.borderColor || null, borderStyle: isLineStyle(m.borderStyle) ? m.borderStyle : 'solid',
       rings: fixRings(m.rings),
       ...(Array.isArray(m.tagAt) && m.tagAt.length === 2 ? { tagAt: fixPt(m.tagAt) } : {}),
+      ...(readProg(m.prog) ? { prog: readProg(m.prog) } : {}),
     }));
+    // 1.5: the progress map and snag pins with their photos
+    S.photos = new Map();
+    for (const ph of Array.isArray(meta.photos) ? meta.photos : []) {
+      const raw = ph && typeof ph.id === 'string' && files[ph.file];
+      if (raw) S.photos.set(ph.id, Object.freeze({ bytes: raw, w: +ph.w || 0, h: +ph.h || 0 }));
+    }
+    S.pins = (Array.isArray(meta.pins) ? meta.pins : []).map((q) => readPin(q, sx, sy)).filter(Boolean)
+      .map((p) => (p.photo && !S.photos.has(p.photo) ? Object.freeze({ ...p, photo: null }) : p));
+    S.pinNext = Math.max(1, Number.isFinite(meta.pinNext) ? Math.round(meta.pinNext) : 1, ...S.pins.map((p) => p.n + 1));
+    if (meta.progress && typeof meta.progress === 'object') {
+      S.progress = Object.freeze({ on: !!meta.progress.on, by: meta.progress.by === 'units' ? 'units' : 'area', labels: meta.progress.labels !== false });
+    }
     S.gaps = (meta.gaps || []).map((g) => Object.freeze({ id: g.id, pts: fixRings([g.pts])[0] }));
     S.dims = (meta.dims || []).filter((q) => Array.isArray(q.a) && Array.isArray(q.b)).map((q) => Object.freeze({
       id: String(q.id || '').startsWith('d') ? q.id : 'd' + Math.random().toString(36).slice(2, 10), a: fixPt(q.a), b: fixPt(q.b), off: (+q.off || 0) * sx,
@@ -310,20 +342,24 @@ async function openProject(bytes, path, name, restored = false) {
 // ------------------------------------------------------------------ export
 
 function exportMarkups() {
-  return S.markups.map((m) => ({
-    rings: m.rings,
-    color: hexToRgb(m.color),
-    opacity: m.opacity,
-    borderPx: m.borderPt > 0 ? ptToPx(m.borderPt) : 0,
-    borderColor: hexToRgb(borderColorOf(m)),
-    borderStyle: m.borderStyle || 'solid',
-    bbox: geo(m).bbox,
-  }));
+  return S.markups.map((m0) => {
+    const m = shown(m0); // its status colour on the progress map
+    return {
+      rings: m.rings,
+      color: hexToRgb(m.color),
+      opacity: m.opacity,
+      borderPx: m.borderPt > 0 ? ptToPx(m.borderPt) : 0,
+      borderColor: hexToRgb(borderColorOf(m)),
+      borderStyle: m.borderStyle || 'solid',
+      bbox: geo(m0).bbox,
+    };
+  });
 }
 
 async function exportImage(type) {
   const legend = await legendPng(1);
   const annots = await annotExport(1);
+  annots.over = await pinExport(1);
   return engine.call('exportImage', { type, quality: 0.92, markups: exportMarkups(), legend, annots }, { onProgress: (f, msg) => busy.update(msg, f) });
 }
 
@@ -341,6 +377,7 @@ async function exportPdf(flat) {
   }
   const legend = await legendPng(flat ? 1 : 2);
   const annots = await annotExport(flat ? 1 : 3);
+  annots.over = await pinExport(flat ? 1 : 3);
   const d = S.doc;
   return engine.call('exportPdf', { mode: flat ? 'flat' : 'vector', markups: ms, legend, annots, title: baseName(d.projectName || d.name) }, { onProgress: (f, msg) => busy.update(msg, f) });
 }
@@ -352,8 +389,8 @@ let saving = false;
 async function saveTo(path, type) {
   if (saving) return false;
   saving = true;
-  const label = { plantint: 'project', png: 'PNG picture', jpg: 'JPEG picture', pdf: 'PDF', pdfflat: 'flattened PDF', xlsx: 'schedule', csv: 'schedule' }[type];
-  const isSchedule = type === 'xlsx' || type === 'csv';
+  const label = { plantint: 'project', png: 'PNG picture', jpg: 'JPEG picture', pdf: 'PDF', pdfflat: 'flattened PDF', xlsx: 'schedule', csv: 'schedule', progress: 'progress report', snags: 'snag list' }[type];
+  const isSchedule = type === 'xlsx' || type === 'csv' || type === 'progress' || type === 'snags';
   busy.show(`Saving the ${label}`, null);
   try {
     let bytes;
@@ -362,6 +399,8 @@ async function saveTo(path, type) {
     else if (type === 'pdf' || type === 'pdfflat') bytes = await exportPdf(type === 'pdfflat');
     else if (type === 'xlsx') bytes = scheduleXlsx();
     else if (type === 'csv') bytes = scheduleCsv();
+    else if (type === 'progress') bytes = progressXlsx();
+    else if (type === 'snags') bytes = await snagXlsx();
     else throw new Error('Unknown file type.');
     busy.update('Writing the file', 0.98);
     await window.plantint.writeFile(path, bytes);
@@ -393,12 +432,22 @@ export async function saveAs(presetType, keepWork = false) {
     toast('A schedule needs the drawing’s scale. Calibrate from a known length (C) or type the scale, then save again.', { timeout: 7000 });
     return false;
   }
+  if (type === 'progress' && !S.markups.length) {
+    toast('There are no zones yet. Fill or draw the zones, give them a status, then save the progress report.', { timeout: 7000 });
+    return false;
+  }
+  if (type === 'snags' && !S.pins.length) {
+    toast('There are no snag pins yet. Drop pins with the Snag pin tool (X), then save the snag list.', { timeout: 7000 });
+    return false;
+  }
   const t = SAVE_TYPES.find((q) => q.id === type);
   const d = S.doc;
   const dir = d.projectPath ? d.projectPath.replace(/[^\\/]*$/, '') : (d.path ? d.path.replace(/[^\\/]*$/, '') : '');
   let base = baseName(d.projectName || d.name) + (d.pageCount > 1 && !d.projectName ? ` - page ${d.pageIndex + 1}` : '');
   if (type === 'pdfflat') base += ' - flattened';
   if (type === 'xlsx' || type === 'csv') base += ' - schedule';
+  if (type === 'progress') base += ' - progress';
+  if (type === 'snags') base += ' - snag list';
   const r = await window.plantint.saveDialog({ title: 'Save ' + t.title, defaultPath: dir + base + '.' + t.ext, type });
   if (!r) return false;
   return saveTo(r.path, type);

@@ -920,11 +920,15 @@ function drawMarkupReplace(o, m) {
 /** Decodes the dimension and tag pictures once per export. */
 async function annotBitmaps(annots) {
   if (!annots) return null;
-  const images = [];
-  for (const im of annots.images || []) images.push({ ...im, bitmap: await createImageBitmap(new Blob([im.png], { type: 'image/png' })) });
-  return { lines: annots.lines || [], images };
+  const bitmaps = async (list) => {
+    const out = [];
+    for (const im of list || []) out.push({ ...im, bitmap: await createImageBitmap(new Blob([im.png], { type: 'image/png' })) });
+    return out;
+  };
+  // over: pictures drawn after the legend (snag pins), so nothing covers them
+  return { lines: annots.lines || [], images: await bitmaps(annots.images), over: await bitmaps(annots.over) };
 }
-function closeAnnots(a) { if (a) for (const im of a.images) im.bitmap.close(); }
+function closeAnnots(a) { if (a) for (const im of [...a.images, ...a.over]) im.bitmap.close(); }
 
 /** Dimension lines (vectors) and their text and area tags (pictures) for rows y0..y0+bh. */
 function drawAnnotsBand(ctx, y0, bh, an) {
@@ -983,6 +987,7 @@ function composeBand(ctx, y0, bh, markups, legend, overlay, annots = null) {
   if (legend && legend.bitmap && legend.y < y0 + bh && legend.y + legend.h > y0) {
     ctx.drawImage(legend.bitmap, legend.x, legend.y - y0, legend.w, legend.h);
   }
+  if (annots && annots.over.length) drawAnnotsBand(ctx, y0, bh, { lines: [], images: annots.over });
 }
 
 async function legendBitmapOf(legend) {
@@ -1303,8 +1308,10 @@ H_.exportPdf = async ({ mode, markups, legend, annots, title }, id) => {
       }
       ops.push('Q');
     }
-    let ti = 0;
-    for (const im of annots.images || []) {
+  }
+  let ti = 0;
+  const placeImages = async (list) => {
+    for (const im of list || []) {
       const px = await rgbaOfPng(im.png);
       const name = 'PlanTintT' + ti++;
       xobj.put(name, addPlainImage(out, px.rgb, px.w, px.h, px.alpha)); nX++;
@@ -1314,13 +1321,16 @@ H_.exportPdf = async ({ mode, markups, legend, annots, title }, id) => {
       const mat = [c * im.w, sn * im.w, sn * im.h, -c * im.h, c * x0 - sn * yb + im.cx, sn * x0 + c * yb + im.cy];
       ops.push(`q ${mat.map(pn).join(' ')} cm /${name} Do Q`);
     }
-  }
+  };
+  if (annots && mode !== 'flat') await placeImages(annots.images);
   // legend
   if (lg && mode !== 'flat') {
     const L = await legendRgb(lg);
     xobj.put('PlanTintLegend', addPlainImage(out, L.rgb, L.w, L.h, null)); nX++;
     ops.push(`q ${pn(lg.w)} 0 0 ${pn(-lg.h)} ${pn(lg.x)} ${pn(lg.y + lg.h)} cm /PlanTintLegend Do Q`);
   }
+  // snag pins, over everything
+  if (annots && mode !== 'flat') await placeImages(annots.over);
   ops.push('Q');
   const overlay = ops.join('\n') + '\n';
   prog(0.85, 'Writing the PDF');
@@ -1362,7 +1372,7 @@ H_.exportPdf = async ({ mode, markups, legend, annots, title }, id) => {
   }
   try {
     if (title) out.setMetaData('info:Title', title);
-    out.setMetaData('info:Creator', 'PlanTint 1.4');
+    out.setMetaData('info:Creator', 'PlanTint 1.5');
   } catch { /* metadata is optional */ }
   prog(0.9, 'Compressing the PDF');
   const buf = out.saveToBuffer('compress,compress-images,compress-fonts,garbage');

@@ -1,6 +1,10 @@
 // Pointer and keyboard interaction: tools, selection, editing, navigation.
 
 import { S, emit, on, makeMarkup, withProps, setSelection, selectedMarkups, ptToPx, uid, makeDim, isDimId } from './state.js';
+import { progressOn, STATUSES, commonStatus } from './progress.js';
+import { hitPin, makePin, movedPin, pinsIn, PIN_MIN_CSS, PIN_STATUSES, selectedPins } from './pins.js';
+import { setZoneProg } from './progresspanel.js';
+import { setPinStatus, editPinNote, choosePhoto, flushEdits } from './snagpanel.js';
 import { V, toSheet, zoomAt, pan, fit, setZoomPercent } from './view.js';
 import { T, geo, requestUI, requestAll, setLoupeVisible, moveLoupe, editableRings, VERTEX_EDIT_LIMIT } from './render.js';
 import * as G from './geom.js';
@@ -35,6 +39,7 @@ export const TOOL_INFO = {
   calib: { label: 'Calibrate the scale from a known length', key: 'C', icon: 'ruler' },
   pick: { label: 'Pick a colour from the sheet', key: 'I', icon: 'pipette' },
   erase: { label: 'Eraser: highlights and colour in the drawing', key: 'E', icon: 'eraser' },
+  pin: { label: 'Snag pin: mark a defect', key: 'X', icon: 'map-pin' },
 };
 
 const HINTS = {
@@ -48,6 +53,7 @@ const HINTS = {
   calib: 'Click both ends of a length you know (a dimension, a door, a grid spacing), then type its real length.',
   pick: 'Click the sheet or a markup to take its colour. Selected markups take the colour too.',
   erase: 'Drag to erase colour: highlights and colour painted in the drawing. Lines and paper stay. Shift+click removes a whole markup or coloured area. [ and ] change the size.',
+  pin: 'Click where the snag is to drop a numbered pin, then type what is wrong (Enter to finish). Set the trade, status (1 2 3) and photo in the panel; Ctrl+V pastes a photo. Pins print.',
 };
 
 export function initTools(canvas, h_) {
@@ -104,7 +110,7 @@ export function hintFor(tool) { return HINTS[tool] || ''; }
 /** Drops anything half-drawn (used when another drawing opens). */
 export function resetInteraction() {
   cancelDrawing();
-  T.brush = null; T.hoverId = null; T.hoverVertex = null; T.moveIds = null; T.vertexEdit = null; T.dimEdit = null; T.tagEdit = null; T.hoverDimId = null; T.hoverTagId = null;
+  T.brush = null; T.hoverId = null; T.hoverVertex = null; T.moveIds = null; T.vertexEdit = null; T.dimEdit = null; T.tagEdit = null; T.hoverDimId = null; T.hoverTagId = null; T.hoverPinId = null;
   T.legendPreview = null; T.detectPreview = null; T.detectHover = null; T.flash = null; T.busyAt = null; T.guide = null;
   P.down = false; P.mode = null; P.data = null;
 }
@@ -128,9 +134,11 @@ export function updateCursor() {
   else if (S.tool === 'rect') c = 'none';
   else if (S.tool === 'pick') c = 'copy';
   else if (S.tool === 'erase') c = 'none';
+  else if (S.tool === 'pin') c = P.mode === 'move' ? 'move' : T.hoverPinId ? 'pointer' : 'crosshair';
   else if (S.tool === 'select') {
     if (T.hoverVertex || hoverDimHandle) c = 'move';
     else if (P.mode === 'move' || P.mode === 'legend-move' || P.mode === 'tag-move' || P.mode === 'dim-handle') c = 'move';
+    else if (T.hoverPinId) c = 'pointer';
     else if (hoverLegendHandle) c = 'nwse-resize';
     else if (T.hoverTagId) c = 'move';
     else if (T.hoverId || T.hoverDimId || hoverLegend) c = 'pointer';
@@ -138,6 +146,9 @@ export function updateCursor() {
   if (S.loupe.on && S.doc && c !== 'grab' && c !== 'grabbing') c = 'none';
   cv.style.cursor = c;
 }
+
+/** The snag pin under a point: pins keep a clickable size on screen however far out the view is. */
+const pinAt = (x, y) => hitPin(x, y, (PIN_MIN_CSS * V.dpr) / V.scale, tolSheet(2));
 
 export function hitMarkup(x, y) {
   for (let i = S.markups.length - 1; i >= 0; i--) {
@@ -332,6 +343,7 @@ export function nameFromText(rings) {
 
 function onDown(e) {
   closeMenu();
+  flushEdits(); // a note or trade being typed is kept for the pin it belongs to
   if (!S.doc || modalOpen() || hooks.blocked()) return;
   cv.setPointerCapture(e.pointerId);
   const dev = devOf(e);
@@ -450,6 +462,12 @@ function onContext(e) {
       return;
     }
   }
+  const pin = pinAt(x, y);
+  if (pin) {
+    if (!S.selection.has(pin.id)) setSelection([pin.id]);
+    pinMenu(e.clientX, e.clientY);
+    return;
+  }
   const v = vertexAt(dev[0], dev[1]);
   if (S.tool === 'select' && v) {
     const ring = v.m.rings[v.ri];
@@ -485,7 +503,7 @@ function onContext(e) {
   }
   showMenu(e.clientX, e.clientY, [
     { label: 'Paste', key: 'Ctrl+V', icon: 'copy', disabled: !clipboard.length, onClick: paste },
-    { label: 'Select all', key: 'Ctrl+A', icon: 'layers', disabled: !S.markups.length, onClick: () => setSelection(S.markups.map((q) => q.id)) },
+    { label: 'Select all', key: 'Ctrl+A', icon: 'layers', disabled: !S.markups.length && !S.pins.length, onClick: selectAll },
     'sep',
     { label: 'Remove colour in this area of the drawing', icon: 'eraser', onClick: () => eraseColourAreaAt(x, y, dev) },
     'sep',
@@ -493,18 +511,41 @@ function onContext(e) {
   ]);
 }
 
+/** Right-click on snag pins: status, photo, zoom, delete. */
+function pinMenu(cx, cy) {
+  const pins = selectedPins();
+  const n = pins.length;
+  const cur = n && pins.every((p) => p.status === pins[0].status) ? pins[0].status : null;
+  showMenu(cx, cy, [
+    ...PIN_STATUSES.map((st) => ({ label: st.label, key: st.key, icon: cur === st.id ? 'check' : null, onClick: () => setPinStatus(st.id) })),
+    'sep',
+    { label: n === 1 && pins[0].photo ? 'Replace photo…' : 'Add photo…', icon: 'camera', disabled: n !== 1, onClick: () => choosePhoto(pins[0].id) },
+    { label: 'Edit note', icon: 'pen-line', disabled: n !== 1, onClick: editPinNote },
+    { label: n > 1 ? 'Zoom to these' : 'Zoom to it', icon: 'locate', onClick: () => zoomToIds(pins.map((p) => p.id)) },
+    'sep',
+    { label: S.selection.size > 1 ? (S.selection.size === n ? `Delete ${n} pins` : `Delete ${S.selection.size} items`) : 'Delete pin', key: 'Del', icon: 'trash-2', danger: true, onClick: deleteSelected },
+  ]);
+}
+
+/** Everything that can be selected: markups, the dimensions when they show, snag pins. */
+function selectAll() {
+  setSelection([...S.markups.map((m) => m.id), ...(S.meas.dims ? S.dims.map((d) => d.id) : []), ...S.pins.map((p) => p.id)]);
+}
+
 export function markupMenu(cx, cy, id) {
   const n = S.selection.size;
+  const cur = commonStatus(selectedMarkups());
   showMenu(cx, cy, [
     { label: 'Rename', key: 'F2', icon: 'pen-line', disabled: n !== 1, onClick: () => startRename(id) },
     { label: n > 1 ? 'Zoom to these' : 'Zoom to it', icon: 'locate', onClick: () => zoomToIds([...S.selection]) },
     { label: 'Duplicate', key: 'Ctrl+D', icon: 'copy', onClick: duplicate },
-    ...(tagsVisible() && S.markups.some((m) => S.selection.has(m.id) && m.tagAt) ? [{ label: 'Put the area tag back in the middle', icon: 'tag', onClick: resetTags }] : []),
+    ...(tagsVisible() && S.markups.some((m) => S.selection.has(m.id) && m.tagAt) ? [{ label: 'Put the tag back in the middle', icon: 'tag', onClick: resetTags }] : []),
+    ...(progressOn() ? ['sep', ...STATUSES.map((st) => ({ label: st.label, key: st.key, icon: cur === st.id ? 'check' : null, onClick: () => setZoneProg({ st: st.id }) }))] : []),
     'sep',
     { label: 'Bring to front', icon: 'arrow-up-to-line', onClick: () => reorder(true) },
     { label: 'Send to back', icon: 'arrow-down-to-line', onClick: () => reorder(false) },
     'sep',
-    { label: n > 1 ? (S.dims.some((d) => S.selection.has(d.id)) ? `Delete ${n} items` : `Delete ${n} markups`) : 'Delete', key: 'Del', icon: 'trash-2', danger: true, onClick: deleteSelected },
+    { label: n > 1 ? (S.dims.some((d) => S.selection.has(d.id)) || S.pins.some((p) => S.selection.has(p.id)) ? `Delete ${n} items` : `Delete ${n} markups`) : 'Delete', key: 'Del', icon: 'trash-2', danger: true, onClick: deleteSelected },
   ]);
 }
 
@@ -550,9 +591,11 @@ function keepTag(m) {
 
 function moveLabel(ids) {
   const nm = S.markups.filter((m) => ids.has(m.id)).length, nd = S.dims.filter((d) => ids.has(d.id)).length;
-  if (nd && !nm) return nd > 1 ? `Move ${nd} dimensions` : 'Move dimension';
-  if (nm && !nd) return nm > 1 ? `Move ${nm} markups` : 'Move markup';
-  return `Move ${nm + nd} items`;
+  const np = S.pins.filter((p) => ids.has(p.id)).length;
+  if (np && !nm && !nd) return np > 1 ? `Move ${np} pins` : 'Move pin';
+  if (nd && !nm && !np) return nd > 1 ? `Move ${nd} dimensions` : 'Move dimension';
+  if (nm && !nd && !np) return nm > 1 ? `Move ${nm} markups` : 'Move markup';
+  return `Move ${nm + nd + np} items`;
 }
 
 const HOVER = {
@@ -562,16 +605,18 @@ const HOVER = {
     const hv = v ? { ri: v.ri, vi: v.vi } : null;
     const dh = v ? null : dimHandleAt(dev[0], dev[1]);
     hoverDimHandle = !!dh;
-    hoverLegendHandle = !v && !dh && onLegendHandle(dev[0], dev[1]);
-    hoverLegend = !hoverLegendHandle && !v && !dh && inLegend(x, y);
-    const free = !v && !dh && !hoverLegend && !hoverLegendHandle;
+    const pin = !v && !dh ? pinAt(x, y) : null; // pins lie on top of everything
+    hoverLegendHandle = !v && !dh && !pin && onLegendHandle(dev[0], dev[1]);
+    hoverLegend = !hoverLegendHandle && !v && !dh && !pin && inLegend(x, y);
+    const free = !v && !dh && !pin && !hoverLegend && !hoverLegendHandle;
     const tg = free ? hitTag(x, y) : null;
     const dm = free && !tg ? hitDim(x, y, tolSheet(6)) : null;
     const m = free && !tg && !dm ? hitMarkup(x, y) : null;
-    const key = [m && m.id, tg && tg.id, dm && dm.id, hv ? hv.ri + ':' + hv.vi : '', dh ? dh.which : ''].join('|');
+    const key = [m && m.id, tg && tg.id, dm && dm.id, pin && pin.id, hv ? hv.ri + ':' + hv.vi : '', dh ? dh.which : ''].join('|');
     T.hoverId = m ? m.id : tg ? tg.id : null;
     T.hoverTagId = tg ? tg.id : null;
     T.hoverDimId = dm ? dm.id : null;
+    T.hoverPinId = pin ? pin.id : null;
     T.hoverVertex = hv;
     T.hoverDimHandle = dh ? dh.which : null;
     updateCursor();
@@ -620,6 +665,12 @@ const HOVER = {
   },
   fill() { if (S.loupe.on) requestUI(); },
   pick() { if (S.loupe.on) requestUI(); },
+  pin(e, x, y) {
+    const p = pinAt(x, y);
+    const id = p ? p.id : null;
+    if (id !== T.hoverPinId) { T.hoverPinId = id; updateCursor(); requestUI(); }
+    else if (S.loupe.on) requestUI();
+  },
   dim(e, x, y) {
     if (!T.dim) { dimPoint(e, x, y); requestUI(); return; }
     if (T.dim.phase === 'b') { T.dim.cur = dimPoint(e, x, y, T.dim.a); requestUI(); return; }
@@ -658,6 +709,12 @@ const DOWN = {
       T.dimEdit = { ...dh.d };
       return;
     }
+    const pin = pinAt(x, y);
+    if (pin) {
+      selectHit(pin.id, e);
+      if (S.selection.has(pin.id)) { P.mode = 'move-pending'; P.data = { ids: new Set(S.selection) }; }
+      return;
+    }
     if (onLegendHandle(dev[0], dev[1])) {
       const L = S.legend;
       const lay = legendLayout(L);
@@ -694,6 +751,22 @@ const DOWN = {
   fill(e, x, y, dev) {
     if (e.altKey) { pickAt(x, y); return; }
     runFill(x, y, dev);
+  },
+  pin(e, x, y) {
+    const hit = pinAt(x, y);
+    if (hit) {
+      // an existing pin: select it (and drag to move it)
+      selectHit(hit.id, e);
+      if (S.selection.has(hit.id)) { P.mode = 'move-pending'; P.data = { ids: new Set(S.selection) }; }
+      return;
+    }
+    if (x < 0 || y < 0 || x > S.doc.W || y > S.doc.H) { toast('Drop snag pins on the sheet.'); return; }
+    const p = makePin(x, y);
+    change(`Add snag pin ${p.n}`, () => { S.pins = [...S.pins, p]; S.pinNext = p.n + 1; });
+    setSelection([p.id]);
+    T.hoverPinId = p.id;
+    emit('pinAdded', p.id);
+    editPinNote();
   },
   polygon(e, x, y) {
     if (e.altKey) {
@@ -894,6 +967,7 @@ const DRAG = {
   },
   polygon(e, x, y) { HOVER.polygon(e, x, y); },
   gap(e, x, y) { HOVER.gap(e, x, y); },
+  pin(e, x, y) { if (P.mode === 'move-pending' || P.mode === 'move') DRAG.select(e, x, y); },
   dim(e, x, y) { if (P.mode !== 'none') HOVER.dim(e, x, y); },
   calib(e, x, y) { if (P.mode !== 'none') HOVER.calib(e, x, y); },
 };
@@ -940,13 +1014,14 @@ const UP = {
       if (dx || dy) change(moveLabel(ids), () => {
         S.markups = S.markups.map((m) => (ids.has(m.id) ? movedMarkup(m, dx, dy) : m));
         S.dims = S.dims.map((d) => (ids.has(d.id) ? Object.freeze(movedDim(d, dx, dy)) : d));
+        S.pins = S.pins.map((p) => (ids.has(p.id) ? movedPin(p, dx, dy) : p));
       });
       requestAll();
       return;
     }
     if (P.mode === 'move-pending') {
       if (!e.shiftKey && !e.ctrlKey && S.selection.size > 1) {
-        const m = hitDim(x, y, tolSheet(6)) || hitMarkup(x, y);
+        const m = pinAt(x, y) || hitDim(x, y, tolSheet(6)) || hitMarkup(x, y);
         if (m) setSelection([m.id]);
       }
       return;
@@ -969,6 +1044,7 @@ const UP = {
           if (b.crossing ? touch : inside) hits.push(d.id);
         }
       }
+      for (const p of pinsIn(r)) hits.push(p.id);
       const lr = legendRect();
       const legHit = !!lr && (b.crossing ? !(lr[2] < r[0] || lr[0] > r[2] || lr[3] < r[1] || lr[1] > r[3]) : lr[0] >= r[0] && lr[1] >= r[1] && lr[2] <= r[2] && lr[3] <= r[3]);
       setSelection(P.data.add ? [...new Set([...S.selection, ...hits])] : hits, legHit || (P.data.add && S.legendSelected));
@@ -980,6 +1056,7 @@ const UP = {
     if (!P.moved && !T.rect.waiting) { T.rect.waiting = true; emit('rect'); return; }
     if (!T.rect.waiting) finishRect();
   },
+  pin(e, x, y) { if (P.mode === 'move-pending' || P.mode === 'move') UP.select(e, x, y); },
   dim(e, x, y) {
     // pressed on the first point and dragged to the second
     if (P.mode === 'none' || !P.moved || !T.dim || T.dim.phase !== 'b') return;
@@ -1006,7 +1083,13 @@ const UP = {
 };
 
 const DBL = {
+  pin(e, x, y) {
+    const p = pinAt(x, y);
+    if (p) { setSelection([p.id]); editPinNote(); }
+  },
   select(e, x, y) {
+    const pin = pinAt(x, y);
+    if (pin) { setSelection([pin.id]); editPinNote(); return; }
     const tg = hitTag(x, y);
     if (tg) { setSelection([tg.id]); startRename(tg.id); return; } // a tag: rename its markup
     if (hitDim(x, y, tolSheet(6))) return; // a dimension lies over the markup here
@@ -1546,12 +1629,21 @@ export function deleteSelected() {
   if (S.legendSelected && !ids.size) { hooks.toggleLegend(false); return; }
   if (!ids.size) return;
   const nm = S.markups.filter((m) => ids.has(m.id)).length, nd = S.dims.filter((d) => ids.has(d.id)).length;
-  if (!nm && !nd) return;
-  const what = nd && !nm ? (nd > 1 ? `${nd} dimensions` : '1 dimension') : nm && !nd ? (nm > 1 ? `${nm} markups` : '1 markup') : `${nm + nd} items`;
-  const label = nd && !nm ? (nd > 1 ? `Delete ${nd} dimensions` : 'Delete dimension') : nm && !nd ? (nm > 1 ? `Delete ${nm} markups` : 'Delete markup') : `Delete ${nm + nd} items`;
+  const pins = S.pins.filter((p) => ids.has(p.id)), np = pins.length;
+  if (!nm && !nd && !np) return;
+  const kinds = [[nm, 'markup', 'markups'], [nd, 'dimension', 'dimensions'], [np, 'snag pin', 'snag pins']].filter((q) => q[0]);
+  let what, label;
+  if (kinds.length > 1) { what = `${nm + nd + np} items`; label = `Delete ${what}`; }
+  else {
+    const [n, one, many] = kinds[0];
+    if (n > 1) { what = `${n} ${many}`; label = `Delete ${what}`; }
+    else if (np) { what = `snag pin ${pins[0].n}`; label = `Delete ${what}`; }
+    else { what = `1 ${one}`; label = `Delete ${one}`; }
+  }
   change(label, () => {
     S.markups = S.markups.filter((m) => !ids.has(m.id));
     S.dims = S.dims.filter((d) => !ids.has(d.id));
+    S.pins = S.pins.filter((p) => !ids.has(p.id));
   });
   setSelection([]);
   toast(`Deleted ${what}.`, { action: 'Undo', onAction: hooks.undo });
@@ -1561,6 +1653,8 @@ export function copySelected() {
   clipboard = selectedMarkups().map((m) => ({ ...m }));
   if (clipboard.length) toast(clipboard.length > 1 ? `Copied ${clipboard.length} markups.` : 'Copied 1 markup.');
 }
+
+export const canPaste = () => clipboard.length > 0;
 
 export function paste() {
   if (!clipboard.length || !S.doc) return;
@@ -1617,6 +1711,7 @@ function nudge(dx, dy) {
   change('Nudge', () => {
     S.markups = S.markups.map((m) => (ids.has(m.id) ? movedMarkup(m, dx, dy) : m));
     S.dims = S.dims.map((d) => (ids.has(d.id) ? Object.freeze(movedDim(d, dx, dy)) : d));
+    S.pins = S.pins.map((p) => (ids.has(p.id) ? movedPin(p, dx, dy) : p));
   });
 }
 
@@ -1685,9 +1780,13 @@ function onKeyDown(e) {
     if (!spaceDown) { spaceDown = true; updateCursor(); }
     return;
   }
-  if (ctrl && (k === 'a' || k === 'A')) { e.preventDefault(); setSelection([...S.markups.map((m) => m.id), ...(S.meas.dims ? S.dims.map((d) => d.id) : [])]); return; }
+  if (ctrl && (k === 'a' || k === 'A')) { e.preventDefault(); selectAll(); return; }
   if (ctrl && (k === 'c' || k === 'C')) { e.preventDefault(); copySelected(); return; }
-  if (ctrl && (k === 'v' || k === 'V')) { e.preventDefault(); paste(); return; }
+  if (ctrl && (k === 'v' || k === 'V')) {
+    // one pin selected: the paste event brings a copied photo to it (see main.js)
+    if (S.selection.size === 1 && selectedPins().length === 1) return;
+    e.preventDefault(); paste(); return;
+  }
   if (ctrl && (k === 'd' || k === 'D')) { e.preventDefault(); duplicate(); return; }
   if (ctrl && (k === '0')) { e.preventDefault(); fit(); requestAll(); emit('view'); return; }
   if (ctrl && (k === '1')) { e.preventDefault(); setZoomPercent(100); requestAll(); emit('view'); return; }
@@ -1722,7 +1821,20 @@ function onKeyDown(e) {
     return;
   }
   if (ctrl || e.altKey) return;
-  const map = { s: 'select', f: 'fill', p: 'polygon', r: 'rect', g: 'gap', i: 'pick', e: 'erase', k: 'dim', c: 'calib' };
+  // status keys: 1 2 3 for the selected pins (Open, Fixed, Closed); with the progress map on, 1 2 3 0 for the
+  // selected zones (Not started, In progress, Done, Not counted)
+  if (/^[0-3]$/.test(k) && S.selection.size) {
+    const zones = progressOn() && selectedMarkups().length > 0;
+    const pinSt = PIN_STATUSES.find((x) => x.key === k);
+    if (zones) {
+      const st = STATUSES.find((x) => x.key === k);
+      if (st) { e.preventDefault(); setZoneProg({ st: st.id }); }
+      return;
+    }
+    if (pinSt && selectedPins().length) { e.preventDefault(); setPinStatus(pinSt.id); }
+    return;
+  }
+  const map = { s: 'select', f: 'fill', p: 'polygon', r: 'rect', g: 'gap', i: 'pick', e: 'erase', k: 'dim', c: 'calib', x: 'pin' };
   const lk = k.toLowerCase();
   if (map[lk]) { e.preventDefault(); setTool(map[lk]); return; }
   if (lk === 'm') { e.preventDefault(); hooks.toggleLoupe(); return; }
