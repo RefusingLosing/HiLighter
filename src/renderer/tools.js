@@ -1641,6 +1641,7 @@ function onKeyDown(e) {
   const k = e.key;
   const ctrl = e.ctrlKey || e.metaKey;
   if (ctrl && (k === 'o' || k === 'O')) { e.preventDefault(); hooks.open(); return; }
+  if (ctrl && !e.shiftKey && (k === 'n' || k === 'N')) { e.preventDefault(); window.plantint.newWindow(); return; }
   if (ctrl && (k === 's' || k === 'S')) { e.preventDefault(); hooks.save(e.shiftKey); return; }
   if (ctrl && !e.shiftKey && (k === 'z' || k === 'Z')) { e.preventDefault(); if (T.poly && T.poly.pts.length) { T.poly.pts.length -= 2; if (!T.poly.pts.length) T.poly = null; requestUI(); } else hooks.undo(); return; }
   if (ctrl && (k === 'y' || k === 'Y' || ((k === 'z' || k === 'Z') && e.shiftKey))) { e.preventDefault(); hooks.redo(); return; }

@@ -174,7 +174,7 @@ const bb = (rings) => { const b = [1e9, 1e9, -1e9, -1e9]; for (const r of rings)
     await shot(page, 't0_tools');
     // crash recovery copy
     await page.evaluate(() => window.__plantint.writeRecovery());
-    check(fs.existsSync(RECOVERY_DIR + '/session.plantint'), 'a recovery copy is written while work is unsaved', R);
+    check(fs.existsSync(RECOVERY_DIR) && fs.readdirSync(RECOVERY_DIR).some((n) => n.endsWith('.plantint')), 'a recovery copy is written while work is unsaved', R);
     // kill without closing
     app.process().kill('SIGKILL');
   } catch (e) { check(false, 'tools: ' + e.stack, R); await shot(page, 't0_err'); await quit(app); }

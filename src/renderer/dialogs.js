@@ -487,7 +487,7 @@ export function showHelp() {
     ['Eraser', [['Drag', 'Erase colour under the brush'], ['Shift+click', 'Remove a whole markup or coloured area'], ['[ and ]', 'Smaller / larger brush'], ['Right-click', 'Remove colour in this area of the drawing']]],
     ['Painted colour (D)', [['Click an outline', 'Leave that area out, or add it back'], ['Pick button', 'Find a colour you click (greys too)'], ['Esc', 'Stop picking, or close the panel']]],
     ['Selecting and editing', [['Click', 'Select a markup'], ['Shift+click', 'Add to the selection'], ['Ctrl+click', 'Add or remove'], ['Drag right', 'Select markups fully inside the box'], ['Drag left', 'Select markups the box touches'], ['Shift+click in list', 'Select a range'], ['Arrows', 'Nudge (Shift: 10×)'], ['Double-click edge', 'Add a corner'], ['F2', 'Rename'], ['Ctrl+D', 'Duplicate'], ['Del', 'Delete']]],
-    ['View and file', [['Wheel', 'Zoom at the pointer'], ['Space+drag', 'Pan (or middle mouse)'], ['Ctrl+0', 'Fit the sheet'], ['Ctrl+1', 'Real size'], ['Alt+wheel', 'Magnifier strength'], ['Ctrl+Z / Ctrl+Y', 'Undo / Redo'], ['Ctrl+S', 'Save'], ['Ctrl+Shift+S', 'Save as another file type'], ['Ctrl+O', 'Open']]],
+    ['View and file', [['Wheel', 'Zoom at the pointer'], ['Space+drag', 'Pan (or middle mouse)'], ['Ctrl+0', 'Fit the sheet'], ['Ctrl+1', 'Real size'], ['Alt+wheel', 'Magnifier strength'], ['Ctrl+Z / Ctrl+Y', 'Undo / Redo'], ['Ctrl+S', 'Save'], ['Ctrl+Shift+S', 'Save as another file type'], ['Ctrl+O', 'Open'], ['Ctrl+N', 'New window, for a second drawing']]],
   ];
   const body = h('div', null,
     h('div', { class: 'help-grid' }, ...rows.map(([t, items]) => h('section', null,

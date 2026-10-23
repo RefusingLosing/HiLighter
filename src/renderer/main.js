@@ -306,7 +306,7 @@ function buildEmpty() {
       h('li', null, h('strong', null, 'Fill'), ' rooms with one click, or draw polygons and rectangles. Each one gets a name.'),
       h('li', null, h('strong', null, 'Measure'), ' areas, perimeters and dimensions (K) at the drawing’s scale, or calibrate it from a length you know (C).'),
       h('li', null, h('strong', null, 'Save'), ' with the legend as a PDF, a picture, or a project to edit later.')),
-    h('p', { class: 'empty-formats' }, 'Ctrl+O to open, F1 for every key.')));
+    h('p', { class: 'empty-formats' }, 'Ctrl+O to open, Ctrl+N for a second window, F1 for every key.')));
   const upd = () => { el.hidden = !!S.doc; };
   on('docLoaded', upd);
   upd();
@@ -354,9 +354,6 @@ async function start() {
   initIO();
   initCloseFlow();
   initDrop();
-  window.plantint.onOpenFile(async (p) => {
-    try { const f = await window.plantint.readFile(p); openFile(f); } catch (err) { toast('Could not open the file: ' + err.message, { kind: 'error' }); }
-  });
   let first = true;
   const ro = new ResizeObserver(() => {
     const keepFit = S.doc && first;

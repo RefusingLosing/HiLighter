@@ -13,7 +13,7 @@ contextBridge.exposeInMainWorld('plantint', {
   closeAck: () => ipcRenderer.send('app:close-ack'),
   quit: () => ipcRenderer.send('app:quit'),
   onCloseRequest: (cb) => ipcRenderer.on('app:close-request', () => cb()),
-  onOpenFile: (cb) => ipcRenderer.on('app:open-file', (_e, p) => cb(p)),
+  newWindow: () => ipcRenderer.send('window:new'),
   pathForFile: (file) => { try { return webUtils.getPathForFile(file); } catch { return ''; } },
   recoveryWrite: (bytes, meta) => ipcRenderer.invoke('recovery:write', bytes, meta),
   recoveryRead: () => ipcRenderer.invoke('recovery:read'),

@@ -1,8 +1,10 @@
 'use strict';
 // PlanTint — Electron main process.
-// Owns the window, native file dialogs, file IO and the close/save handshake with the renderer.
+// Owns the windows, native file dialogs, file IO and the close/save handshake with each window.
+// Every window is an independent drawing: its own page, marking, scale and crash-recovery copy.
 
 const { app, BrowserWindow, ipcMain, dialog, protocol, shell, screen, Menu } = require('electron');
+const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 
@@ -29,10 +31,15 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
-let win = null;
-let allowClose = false;
-let closeFallbackTimer = null;
-let pendingOpenPath = null;
+// Per-window state, keyed by the window's id.
+//   key: names this window's crash-recovery copy; allowClose: set once the window may close;
+//   closeTimer: the "not responding" fallback; startupPath: a file to open when the window starts.
+const state = new Map();
+const windowOf = (e) => BrowserWindow.fromWebContents(e.sender);
+const stateOf = (e) => {
+  const w = windowOf(e);
+  return w ? state.get(w.id) || null : null;
+};
 
 function fileFromArgv(argv) {
   for (const a of argv.slice(1)) {
@@ -54,19 +61,23 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
+  // A second launch (for example a double-click on a drawing) opens its file in a window of its own.
+  // Without a file it brings the most recent window forward.
   app.on('second-instance', (_e, argv) => {
-    const f = fileFromArgv(argv);
-    if (win) {
-      if (win.isMinimized()) win.restore();
-      win.focus();
-      if (f) win.webContents.send('app:open-file', f);
-    }
+    app.whenReady().then(() => {
+      const f = fileFromArgv(argv);
+      if (f) { createWindow(f); return; }
+      const w = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+      if (!w) { createWindow(); return; }
+      if (w.isMinimized()) w.restore();
+      w.focus();
+    });
   });
 }
 
-function createWindow() {
+function createWindow(startupPath = null) {
   const wa = screen.getPrimaryDisplay().workAreaSize;
-  win = new BrowserWindow({
+  const win = new BrowserWindow({
     width: Math.min(1600, wa.width),
     height: Math.min(1000, wa.height),
     minWidth: 1024,
@@ -86,6 +97,9 @@ function createWindow() {
       backgroundThrottling: false,
     },
   });
+  const id = win.id;
+  const st = { key: 'w-' + crypto.randomUUID(), allowClose: false, closeTimer: null, startupPath };
+  state.set(id, st);
 
   win.once('ready-to-show', () => {
     if (wa.width <= 1920) win.maximize();
@@ -96,12 +110,12 @@ function createWindow() {
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
   win.on('close', (e) => {
-    if (allowClose) return;
+    if (st.allowClose) return;
     e.preventDefault();
     win.webContents.send('app:close-request');
     // If the page never answers (hung), fall back to a native question so the user can always leave.
-    clearTimeout(closeFallbackTimer);
-    closeFallbackTimer = setTimeout(() => {
+    clearTimeout(st.closeTimer);
+    st.closeTimer = setTimeout(() => {
       const r = dialog.showMessageBoxSync(win, {
         type: 'warning',
         buttons: ['Close without saving', 'Keep waiting'],
@@ -111,7 +125,7 @@ function createWindow() {
         message: 'PlanTint is not responding.',
         detail: 'Close the window anyway? Unsaved marking will be lost.',
       });
-      if (r === 0) { allowClose = true; win.close(); }
+      if (r === 0) { st.allowClose = true; win.close(); }
     }, 5000);
   });
 
@@ -125,11 +139,15 @@ function createWindow() {
       message: 'PlanTint stopped unexpectedly.',
       detail: 'Your last copy of unsaved work will be offered when it restarts.',
     });
-    if (r === 0) win.reload(); else { allowClose = true; win.close(); }
+    if (r === 0) win.reload(); else { st.allowClose = true; win.close(); }
   });
 
-  win.on('closed', () => { win = null; });
+  win.on('closed', () => {
+    clearTimeout(st.closeTimer);
+    state.delete(id);
+  });
   win.loadURL('app://bundle/index.html');
+  return win;
 }
 
 app.whenReady().then(() => {
@@ -148,20 +166,21 @@ app.whenReady().then(() => {
       return new Response('Not found', { status: 404 });
     }
   });
-  pendingOpenPath = fileFromArgv(process.argv);
-  createWindow();
+  createWindow(fileFromArgv(process.argv));
 });
 
 app.on('window-all-closed', () => app.quit());
 
 // ---------------------------------------------------------------- IPC
 
-ipcMain.handle('dlg:open', async () => {
-  const r = await dialog.showOpenDialog(win, {
+ipcMain.on('window:new', () => createWindow());
+
+ipcMain.handle('dlg:open', async (e) => {
+  const r = await dialog.showOpenDialog(windowOf(e), {
     title: 'Open a drawing or project',
     properties: ['openFile'],
     filters: [
-      { name: 'Drawings and PlanTint projects', extensions: OPENABLE.map((e) => e.slice(1)) },
+      { name: 'Drawings and PlanTint projects', extensions: OPENABLE.map((ext) => ext.slice(1)) },
       { name: 'PDF drawings', extensions: ['pdf'] },
       { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'tif', 'tiff', 'bmp', 'gif', 'webp'] },
       { name: 'PlanTint projects', extensions: ['plantint'] },
@@ -185,9 +204,9 @@ const SAVE_FILTERS = {
 const KNOWN_EXT = ['.plantint', '.pdf', '.png', '.jpg', '.jpeg', '.xlsx', '.csv'];
 
 /** Asks where to save one kind of file. The kind is chosen in the app before this. */
-ipcMain.handle('dlg:save', async (_e, opts) => {
+ipcMain.handle('dlg:save', async (e, opts) => {
   const f = SAVE_FILTERS[opts.type] || SAVE_FILTERS.plantint;
-  const r = await dialog.showSaveDialog(win, {
+  const r = await dialog.showSaveDialog(windowOf(e), {
     title: opts.title || 'Save',
     defaultPath: opts.defaultPath,
     filters: [f],
@@ -220,42 +239,81 @@ ipcMain.handle('fs:write', async (_e, p, bytes) => {
   return true;
 });
 
-ipcMain.handle('app:startup-file', async () => {
-  if (!pendingOpenPath) return null;
-  const p = pendingOpenPath;
-  pendingOpenPath = null;
+ipcMain.handle('app:startup-file', async (e) => {
+  const st = stateOf(e);
+  if (!st || !st.startupPath) return null;
+  const p = st.startupPath;
+  st.startupPath = null;
   try { return readForRenderer(p); } catch { return null; }
 });
 
-ipcMain.on('app:close-ack', () => { clearTimeout(closeFallbackTimer); });
-ipcMain.on('app:quit', () => {
-  clearTimeout(closeFallbackTimer);
-  allowClose = true;
-  if (win) win.close();
+ipcMain.on('app:close-ack', (e) => {
+  const st = stateOf(e);
+  if (st) clearTimeout(st.closeTimer);
 });
-ipcMain.on('app:set-title', (_e, t) => { if (win) win.setTitle(t); });
+ipcMain.on('app:quit', (e) => {
+  const w = windowOf(e);
+  const st = w && state.get(w.id);
+  if (!w || !st) return;
+  clearTimeout(st.closeTimer);
+  st.allowClose = true;
+  w.close();
+});
+ipcMain.on('app:set-title', (e, t) => { const w = windowOf(e); if (w) w.setTitle(t); });
 ipcMain.on('shell:show', (_e, p) => { try { shell.showItemInFolder(p); } catch { /* ignore */ } });
 ipcMain.handle('app:info', () => ({ version: app.getVersion(), platform: process.platform }));
 
-// ---- crash recovery: a copy of the open project kept in the user data folder
+// ---- crash recovery: each window keeps a copy of its project in the user data folder
+// <key>.plantint is the project, <key>.json says its name and time. A copy whose window is no
+// longer open (the app closed or crashed) is offered to the next window that starts.
 const recoveryDir = () => path.join(app.getPath('userData'), 'recovery');
-ipcMain.handle('recovery:write', async (_e, bytes, meta) => {
+const recoveryKey = (e) => { const st = stateOf(e); return st ? st.key : null; };
+
+ipcMain.handle('recovery:write', async (e, bytes, meta) => {
+  const key = recoveryKey(e);
+  if (!key) return false;
   const d = recoveryDir();
   await fs.promises.mkdir(d, { recursive: true });
-  await fs.promises.writeFile(path.join(d, 'session.plantint.part'), Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
-  await fs.promises.rename(path.join(d, 'session.plantint.part'), path.join(d, 'session.plantint'));
-  await fs.promises.writeFile(path.join(d, 'session.json'), JSON.stringify(meta));
+  const file = path.join(d, key + '.plantint');
+  await fs.promises.writeFile(file + '.part', Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+  await fs.promises.rename(file + '.part', file);
+  await fs.promises.writeFile(path.join(d, key + '.json'), JSON.stringify(meta));
   return true;
 });
-ipcMain.handle('recovery:read', async () => {
+
+ipcMain.handle('recovery:read', async (e) => {
+  const key = recoveryKey(e);
+  if (!key) return null;
   try {
     const d = recoveryDir();
-    const meta = JSON.parse(await fs.promises.readFile(path.join(d, 'session.json'), 'utf8'));
-    const data = await fs.promises.readFile(path.join(d, 'session.plantint'));
-    return { meta, bytes: new Uint8Array(data.buffer, data.byteOffset, data.byteLength) };
+    // copies of windows that are still open belong to them; this window's own copy is restored after a reload
+    const live = new Set([...state.values()].map((s) => s.key));
+    let best = null;
+    for (const n of await fs.promises.readdir(d)) {
+      if (!n.endsWith('.json')) continue;
+      const id = n.slice(0, -'.json'.length);
+      if (live.has(id) && id !== key) continue;
+      try { await fs.promises.access(path.join(d, id + '.plantint')); } catch { continue; }
+      let meta;
+      try { meta = JSON.parse(await fs.promises.readFile(path.join(d, n), 'utf8')); } catch { continue; }
+      if (!best || String(meta.time) > String(best.meta.time)) best = { id, meta };
+    }
+    if (!best) return null;
+    if (best.id !== key) {
+      // take the copy over, so it belongs to this window and is cleared when this window saves or closes
+      await fs.promises.rename(path.join(d, best.id + '.plantint'), path.join(d, key + '.plantint'));
+      await fs.promises.rename(path.join(d, best.id + '.json'), path.join(d, key + '.json'));
+    }
+    const data = await fs.promises.readFile(path.join(d, key + '.plantint'));
+    return { meta: best.meta, bytes: new Uint8Array(data.buffer, data.byteOffset, data.byteLength) };
   } catch { return null; }
 });
-ipcMain.handle('recovery:clear', async () => {
-  try { await fs.promises.rm(recoveryDir(), { recursive: true, force: true }); } catch { /* ignore */ }
+
+ipcMain.handle('recovery:clear', async (e) => {
+  const key = recoveryKey(e);
+  if (!key) return true;
+  for (const n of [key + '.plantint', key + '.plantint.part', key + '.json']) {
+    try { await fs.promises.rm(path.join(recoveryDir(), n), { force: true }); } catch { /* ignore */ }
+  }
   return true;
 });
