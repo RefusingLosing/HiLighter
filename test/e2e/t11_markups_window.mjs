@@ -86,13 +86,13 @@ async function openWindow(app, page) {
 
     // ---- select: a click, Ctrl+click, Shift+click; the sheet shows the same selection
     let rows = await pop.$$('table.mw-t tbody tr');
-    await rows[0].click({ position: { x: 120, y: 10 } });
+    await (await rows[0].$('td.c-idx')).click();
     await settle(pop);
     check(JSON.stringify(await selection(page)) === JSON.stringify([ms[0].id]), 'a click on a row selects it on the sheet', R);
-    await rows[2].click({ position: { x: 120, y: 10 }, modifiers: ['Control'] });
+    await (await rows[2].$('td.c-idx')).click({ modifiers: ['Control'] });
     await settle(pop);
     check((await selection(page)).length === 2, 'Ctrl+click adds a row', R);
-    await rows[4].click({ position: { x: 120, y: 10 }, modifiers: ['Shift'] });
+    await (await rows[4].$('td.c-idx')).click({ modifiers: ['Shift'] });
     await settle(pop);
     check((await selection(page)).length === 3, `Shift+click selects a range (${(await selection(page)).length})`, R);
     check((await pop.$$eval('tr.sel', (r) => r.length)) === 3 && /3 selected/.test(await pop.textContent('.mw-sel-title')), 'the window shows the selection', R);
@@ -148,7 +148,7 @@ async function openWindow(app, page) {
 
     // ---- zoom to a markup on the sheet
     const before = await S_(page, () => window.__plantint.V.scale);
-    await pop.locator('table.mw-t tbody tr').nth(4).dblclick({ position: { x: 120, y: 10 } });
+    await pop.locator('table.mw-t tbody tr').nth(4).locator('td.c-idx').dblclick();
     await page.waitForTimeout(400);
     const after = await S_(page, () => window.__plantint.V.scale);
     check(after > before * 1.5, `double-clicking a row zooms the sheet to it (${before.toFixed(3)} → ${after.toFixed(3)})`, R);
@@ -161,8 +161,8 @@ async function openWindow(app, page) {
     await settle(pop);
     now = await markups(page);
     check(now[0].st === 'done' && !now[1].st, 'a row’s status menu sets that zone', R);
-    await pop.locator('table.mw-t tbody tr').nth(1).click({ position: { x: 120, y: 10 } });
-    await pop.locator('table.mw-t tbody tr').nth(2).click({ position: { x: 120, y: 10 }, modifiers: ['Control'] });
+    await pop.locator('table.mw-t tbody tr').nth(1).locator('td.c-idx').click();
+    await pop.locator('table.mw-t tbody tr').nth(2).locator('td.c-idx').click({ modifiers: ['Control'] });
     await pop.locator('.mw-st-btn', { hasText: 'In progress' }).click();
     await settle(pop);
     now = await markups(page);
@@ -295,7 +295,7 @@ async function openWindow(app, page) {
     await clickSheet(page2, ...P(1.0, 5.2));
     await waitMarkups(page2, 1);
     pop = await openWindow(app, page2);
-    await pop.click('.mw-t tbody tr', { position: { x: 120, y: 10 } }); // the window has the focus
+    await pop.click('.mw-t tbody tr td.c-idx'); // the window has the focus
     const exited = new Promise((res) => app.process().once('exit', () => res(true)));
     await mainWindow(app, 'w.close()');
     await page2.waitForSelector('.modal-title', { timeout: 10000 });

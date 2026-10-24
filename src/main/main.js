@@ -159,15 +159,29 @@ function addTab(rec, startupPath = null) {
   tabs.set(wc.id, t);
   rec.tabs.push(t);
   wc.on('will-navigate', (e) => e.preventDefault());
-  // the drawing's markups window: an empty page the drawing fills in and keeps up to date itself
+  // the drawing's markups window: an empty page the drawing fills in and keeps up to date itself. It
+  // sits above PlanTint's window (so a click on the drawing does not hide it) and opens beside the
+  // drawing, or where it was last left, at the size it was last given.
   wc.setWindowOpenHandler(({ url, frameName }) => (url === 'about:blank' && frameName === 'plantint-markups' ? {
     action: 'allow',
     overrideBrowserWindowOptions: {
-      width: 980, height: 720, minWidth: 640, minHeight: 360,
+      ...markupsWindowBounds(rec), minWidth: 420, minHeight: 300,
+      parent: rec.win, resizable: true, maximizable: true, minimizable: false, fullscreenable: false,
       backgroundColor: '#FFFFFF', title: 'Markups', icon: path.join(__dirname, 'icon.png'), autoHideMenuBar: true,
       webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false },
     },
   } : { action: 'deny' }));
+  wc.on('did-create-window', (child) => {
+    t.markupsWin = child;
+    // where it is, kept as it moves: a window that closes itself is gone before 'closed' can ask
+    let last = child.getBounds();
+    const keep = () => { if (!child.isDestroyed()) last = child.isMaximized() ? child.getNormalBounds() : child.getBounds(); };
+    for (const ev of ['resize', 'move', 'maximize', 'unmaximize', 'close']) child.on(ev, keep);
+    child.on('closed', () => {
+      saveMarkupsWindowBounds(last);
+      if (t.markupsWin === child) t.markupsWin = null;
+    });
+  });
   wc.on('before-input-event', (e, input) => tabKeys(rec, e, input));
   wc.on('render-process-gone', (_e, details) => {
     if (details.reason === 'clean-exit') return;
@@ -199,7 +213,47 @@ function activate(t) {
   layout(rec);
   rec.win.setTitle(t.title);
   sendStrip(rec);
+  // a markups window shows only with its own drawing
+  for (const o of rec.tabs) {
+    const w = o.markupsWin;
+    if (!w || w.isDestroyed()) continue;
+    if (o === t) { if (!w.isVisible()) w.showInactive(); } else if (w.isVisible()) w.hide();
+  }
   focusTab(t);
+}
+
+// ------------------------------------------------------------------ the markups window's place
+
+const markupsStateFile = () => path.join(app.getPath('userData'), 'markups-window.json');
+
+/** Where the markups window opens: where it was left, if that is still on a screen; else beside the drawing. */
+function markupsWindowBounds(rec) {
+  try {
+    const b = JSON.parse(fs.readFileSync(markupsStateFile(), 'utf8'));
+    if ([b.x, b.y, b.width, b.height].every(Number.isFinite) && b.width >= 300 && b.height >= 200) {
+      const wa = screen.getDisplayMatching(b).workArea;
+      const ix = Math.min(b.x + b.width, wa.x + wa.width) - Math.max(b.x, wa.x);
+      const iy = Math.min(b.y + b.height, wa.y + wa.height) - Math.max(b.y, wa.y);
+      // most of it on a screen, and its title bar too
+      if (ix > 0 && iy > 0 && ix * iy >= 0.5 * b.width * b.height && b.y >= wa.y - 8 && b.y < wa.y + wa.height - 40) {
+        return { x: Math.round(b.x), y: Math.round(b.y), width: Math.round(Math.min(b.width, wa.width)), height: Math.round(Math.min(b.height, wa.height)) };
+      }
+    }
+  } catch { /* none kept yet */ }
+  // beside the drawing: over the right part of PlanTint's window, leaving most of the sheet in view
+  const w = rec.win.getBounds();
+  const wa = screen.getDisplayMatching(w).workArea;
+  const width = Math.round(Math.min(720, Math.max(480, w.width * 0.36), wa.width));
+  const height = Math.round(Math.min(wa.height, Math.max(380, w.height - 150)));
+  const x = Math.round(Math.max(wa.x, Math.min(w.x + w.width - width - 14, wa.x + wa.width - width)));
+  const y = Math.round(Math.max(wa.y, Math.min(w.y + 104, wa.y + wa.height - height)));
+  return { x, y, width, height };
+}
+
+function saveMarkupsWindowBounds(b) {
+  try {
+    if (b && [b.x, b.y, b.width, b.height].every(Number.isFinite)) fs.writeFileSync(markupsStateFile(), JSON.stringify({ x: b.x, y: b.y, width: b.width, height: b.height }));
+  } catch { /* not kept: it opens beside the drawing next time */ }
 }
 
 /** Puts the shown tab under the strip, filling the rest of the window. */
@@ -463,6 +517,15 @@ ipcMain.on('app:set-title', (e, info) => {
   sendStrip(t.win);
 });
 ipcMain.on('shell:show', (_e, p) => { try { shell.showItemInFolder(p); } catch { /* ignore */ } });
+// the part of a drawing's page that its markups window covers (page pixels), so the drawing can show a
+// markup beside the window rather than under it; null when the window is not open or not in front of it
+ipcMain.handle('markups:cover', (e) => {
+  const t = tabOf(e);
+  const w = t && t.markupsWin;
+  if (!w || w.isDestroyed() || !w.isVisible() || t.win.win.isDestroyed()) return null;
+  const cb = t.win.win.getContentBounds(), vb = t.view.getBounds(), pb = w.getBounds();
+  return { x: pb.x - cb.x - vb.x, y: pb.y - cb.y - vb.y, width: pb.width, height: pb.height };
+});
 ipcMain.handle('app:info', () => ({ version: app.getVersion(), platform: process.platform }));
 
 // ---- crash recovery: each tab keeps a copy of its project in the user data folder

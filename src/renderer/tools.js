@@ -20,6 +20,7 @@ import { calibrateDialog } from './dialogs.js';
 import { setCalibration } from './scale.js';
 import { scaleRatio, fmtScale } from './units.js';
 import { setMeas } from './state.js';
+import { mergeMarkups } from './merge.js';
 
 let cv = null;
 let hooks = {};
@@ -43,7 +44,7 @@ export const TOOL_INFO = {
 };
 
 const HINTS = {
-  select: 'Click a markup to select it. Shift or Ctrl+click adds more. Drag across empty paper to select by area. Drag to move; drag a corner to reshape.',
+  select: 'Click a markup to select it. Shift or Ctrl+click adds more. Drag across empty paper to select by area. Drag to move; drag a corner to reshape. Ctrl+M merges the selected.',
   hand: 'Drag to move around the sheet. The wheel zooms at the pointer.',
   fill: 'Click inside a room or area to fill it. Click an existing fill to give it the current colour. Shift+click adds the area to the highlight next to it. Alt+click picks a colour.',
   polygon: 'Click to place corners. Click the first corner, double-click or press Enter to close. H horizontal, V vertical, A 90° to an edge, Shift ortho.',
@@ -535,10 +536,14 @@ function selectAll() {
 export function markupMenu(cx, cy, id) {
   const n = S.selection.size;
   const cur = commonStatus(selectedMarkups());
+  const nm = selectedMarkups().length;
+  const target = S.markups.find((m) => m.id === id);
   showMenu(cx, cy, [
     { label: 'Rename', key: 'F2', icon: 'pen-line', disabled: n !== 1, onClick: () => startRename(id) },
     { label: n > 1 ? 'Zoom to these' : 'Zoom to it', icon: 'locate', onClick: () => zoomToIds([...S.selection]) },
     { label: 'Duplicate', key: 'Ctrl+D', icon: 'copy', onClick: duplicate },
+    // merging: the markup right-clicked is the one the others go into
+    ...(nm >= 2 && target && S.selection.has(id) ? [{ label: `Merge ${nm} into “${shortName(target.name)}”`, key: 'Ctrl+M', icon: 'squares-unite', onClick: () => mergeSelected(id) }] : []),
     ...(tagsVisible() && S.markups.some((m) => S.selection.has(m.id) && m.tagAt) ? [{ label: 'Put the tag back in the middle', icon: 'tag', onClick: resetTags }] : []),
     ...(progressOn() ? ['sep', ...STATUSES.map((st) => ({ label: st.label, key: st.key, icon: cur === st.id ? 'check' : null, onClick: () => setZoneProg({ st: st.id }) }))] : []),
     'sep',
@@ -1687,6 +1692,27 @@ export function duplicate() {
   paste();
 }
 
+const shortName = (s) => { const t = String(s || ''); return t.length > 28 ? t.slice(0, 27) + '…' : t; };
+
+/**
+ * Merges the selected markups into one: into `intoId` (the one right-clicked), or else into the one
+ * selected first. Neighbours become one area, the line between them included.
+ */
+export function mergeSelected(intoId = null) {
+  const sel = selectedMarkups();
+  if (sel.length < 2) {
+    toast(sel.length ? 'Select two or more markups to merge them: Shift+click or Ctrl+click to add to the selection.' : 'Select the markups to merge first.');
+    return null;
+  }
+  const first = [...S.selection].find((id) => sel.some((m) => m.id === id));
+  const res = mergeMarkups(sel.map((m) => m.id), intoId && sel.some((m) => m.id === intoId) ? intoId : first);
+  if (!res) return null;
+  T.flash = { ids: [res.into.id], until: performance.now() + 900 };
+  requestAll();
+  toast(`Merged ${res.n} markups into “${shortName(res.into.name)}”.`, { action: 'Undo', onAction: hooks.undo });
+  return res;
+}
+
 function resetTags() {
   const ids = S.selection;
   change('Reset area tag', () => { S.markups = S.markups.map((m) => (ids.has(m.id) && m.tagAt ? withProps(m, { tagAt: null }) : m)); });
@@ -1802,6 +1828,7 @@ function onKeyDown(e) {
     e.preventDefault(); paste(); return;
   }
   if (ctrl && (k === 'd' || k === 'D')) { e.preventDefault(); duplicate(); return; }
+  if (ctrl && !e.shiftKey && (k === 'm' || k === 'M' || e.code === 'KeyM')) { e.preventDefault(); mergeSelected(); return; }
   if (ctrl && (k === '0')) { e.preventDefault(); fit(); requestAll(); emit('view'); return; }
   if (ctrl && (k === '1')) { e.preventDefault(); setZoomPercent(100); requestAll(); emit('view'); return; }
   if (k === 'Delete' || (k === 'Backspace' && S.tool === 'select')) { e.preventDefault(); deleteSelected(); return; }

@@ -4,8 +4,8 @@ import { S, on, emit, setSelection, loadMeasPrefs } from './state.js';
 import * as engine from './engine.js';
 import { V, fit, zoomAt, setZoomPercent, zoomPercent } from './view.js';
 import { initRender, resize, requestAll, requestUI, setLoupeVisible, T, scheduleSharp } from './render.js';
-import { initTools, setTool, TOOL_INFO, hintFor, updateCursor, setLock, deleteSelected, duplicate, markupMenu, clearGaps, resetInteraction, rectWaiting, paste, canPaste } from './tools.js';
-import { initPanel, zoomToIds } from './panel.js';
+import { initTools, setTool, TOOL_INFO, hintFor, updateCursor, setLock, deleteSelected, duplicate, markupMenu, clearGaps, resetInteraction, rectWaiting, paste, canPaste, mergeSelected } from './tools.js';
+import { initPanel, zoomToIds, revealIds } from './panel.js';
 import { selectedPins, pinSize, PIN_MIN_CSS } from './pins.js';
 import { progressSummary, progOf } from './progress.js';
 import { photoFile } from './snagpanel.js';
@@ -21,8 +21,11 @@ import { setTypedScale, resetScale } from './scale.js';
 import * as measure from './measure.js';
 import * as annot from './annot.js';
 import * as units from './units.js';
+import * as G from './geom.js';
 
 const $ = (id) => document.getElementById(id);
+/** What the markups window can ask of the drawing. */
+const windowActions = () => ({ zoomTo: zoomToIds, reveal: revealIds, undo: () => hooks.undo(), redo: () => hooks.redo(), requestUI });
 
 const BRAND = `<svg viewBox="0 0 32 32" width="22" height="22" aria-hidden="true">
 <rect x="3.5" y="5.5" width="25" height="21" rx="2" fill="#fff" stroke="#2B302D" stroke-width="1.6"/>
@@ -390,7 +393,7 @@ async function start() {
     setTool, toggleLegend, deleteSelected, duplicate, zoomTo: zoomToIds, requestUI,
     markupMenu: (x, y, id) => markupMenu(x, y, id),
     saveAs: (t) => saveAs(t), undo: () => hooks.undo(),
-    openMarkups: () => openMarkupsWindow({ zoomTo: zoomToIds, undo: () => hooks.undo(), redo: () => hooks.redo(), requestUI }),
+    openMarkups: () => openMarkupsWindow(windowActions()),
   });
   initTools($('ui'), hooks);
   initIO();
@@ -430,7 +433,7 @@ async function start() {
     if (f) openFile(f, true);
   }
   startRecovery();
-  window.__plantint = { S, V, T, hooks, setTool, fit, emit, engine, legendRect, covers: { syncCovers, coversIdle }, markupsWin: { open: () => openMarkupsWindow({ zoomTo: zoomToIds, undo: () => hooks.undo(), redo: () => hooks.redo(), requestUI }), isOpen: markupsWindowOpen }, writeRecovery, measure, annot, units, legend: { legendLayout, legendRows, legendRect }, progress: { progressSummary, progOf }, pins: { pinSize, PIN_MIN_CSS } }; // used by the automated tests
+  window.__plantint = { S, V, T, hooks, setTool, fit, emit, engine, legendRect, covers: { syncCovers, coversIdle }, markupsWin: { open: () => openMarkupsWindow(windowActions()), isOpen: markupsWindowOpen }, merge: { mergeSelected, mergeRings: G.mergeRings }, revealIds, writeRecovery, measure, annot, units, legend: { legendLayout, legendRows, legendRect }, progress: { progressSummary, progOf }, pins: { pinSize, PIN_MIN_CSS } }; // used by the automated tests
 }
 
 start();

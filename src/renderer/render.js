@@ -535,10 +535,23 @@ export function drawUI(ctx, v, isLoupe) {
     if (m) strokeOutline(ctx, v, geo(m).path, 0, 0, 'rgba(36,87,197,0.75)', 1.25);
   }
   if (T.flash && T.flash.until > performance.now()) {
-    const a = (T.flash.until - performance.now()) / 900;
-    for (const id of T.flash.ids) {
-      const m = S.markups.find((q) => q.id === id);
-      if (m) strokeOutline(ctx, v, geo(m).path, 0, 0, `rgba(36,87,197,${Math.max(0, Math.min(1, a))})`, 3);
+    const now = performance.now();
+    if (T.flash.pulse) {
+      // shown from the markups window: a thicker outline that pulses three times, then fades
+      const t = (now - T.flash.start) / Math.max(1, T.flash.until - T.flash.start);
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, Math.min(1, (0.6 + 0.4 * Math.cos(t * Math.PI * 6)) * Math.min(1, (T.flash.until - now) / 350)));
+      for (const id of T.flash.ids) {
+        const m = S.markups.find((q) => q.id === id);
+        if (m) strokeOutline(ctx, v, geo(m).path, 0, 0, BLUE, 4);
+      }
+      ctx.restore();
+    } else {
+      const a = (T.flash.until - now) / 900;
+      for (const id of T.flash.ids) {
+        const m = S.markups.find((q) => q.id === id);
+        if (m) strokeOutline(ctx, v, geo(m).path, 0, 0, `rgba(36,87,197,${Math.max(0, Math.min(1, a))})`, 3);
+      }
     }
   }
   const sel = S.markups.filter((m) => S.selection.has(m.id));

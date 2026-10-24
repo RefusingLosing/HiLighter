@@ -13,7 +13,7 @@ import { PALETTE, normalizeHex, tintOnPaper, borderColorOf, autoBorder } from '.
 import { change, commit, snapshot } from './history.js';
 import { legendLimits, clampLegendSizes, bestLegendSpot } from './legend.js';
 import { requestScene, T, geo } from './render.js';
-import { zoomToRect } from './view.js';
+import { zoomToRect, V, clampPan, minScale } from './view.js';
 import { LINE_STYLES, dashFor } from '../shared/linestyle.js';
 import { progressOn, progLabel, shown } from './progress.js';
 import { buildProgress } from './progresspanel.js';
@@ -598,6 +598,62 @@ export function zoomToIds(ids) {
   T.flash = { ids, until: performance.now() + 900 };
   requestScene();
   emit('view');
+}
+
+/**
+ * Shows where markups are on the sheet, so one can be told from the others: the sheet pans to them
+ * when they are out of view or under the markups window (zooming out only when they do not fit
+ * beside it), and their outlines flash.
+ */
+export async function revealIds(ids) {
+  const ms = S.markups.filter((m) => ids.includes(m.id));
+  if (!ms.length || !S.doc) return;
+  let b = [Infinity, Infinity, -Infinity, -Infinity];
+  for (const m of ms) { const g = geo(m).bbox; b = [Math.min(b[0], g[0]), Math.min(b[1], g[1]), Math.max(b[2], g[2]), Math.max(b[3], g[3])]; }
+  let free = [0, 0, V.cw, V.ch];
+  try {
+    const c = window.plantint && window.plantint.markupsCover ? await window.plantint.markupsCover() : null;
+    const ui = document.getElementById('ui');
+    if (c && ui) {
+      const r = ui.getBoundingClientRect(), d = V.dpr;
+      free = uncovered(free, [(c.x - r.left) * d, (c.y - r.top) * d, (c.x + c.width - r.left) * d, (c.y + c.height - r.top) * d]);
+    }
+  } catch { /* all of the sheet */ }
+  const m = 36 * V.dpr;
+  const fw = free[2] - free[0] - 2 * m, fh = free[3] - free[1] - 2 * m;
+  if (fw > 0 && fh > 0) {
+    const s = V.scale;
+    const X0 = b[0] * s + V.tx, Y0 = b[1] * s + V.ty, X1 = b[2] * s + V.tx, Y1 = b[3] * s + V.ty;
+    const fcx = (free[0] + free[2]) / 2, fcy = (free[1] + free[3]) / 2;
+    if (X1 - X0 > fw || Y1 - Y0 > fh) {
+      // too big to show beside the window at this zoom: zoom out until it fits
+      const ns = Math.max(minScale(), Math.min(fw / Math.max(1, b[2] - b[0]), fh / Math.max(1, b[3] - b[1])));
+      V.scale = ns;
+      V.tx = fcx - ((b[0] + b[2]) / 2) * ns;
+      V.ty = fcy - ((b[1] + b[3]) / 2) * ns;
+      clampPan();
+    } else if (X0 < free[0] + m || Y0 < free[1] + m || X1 > free[2] - m || Y1 > free[3] - m) {
+      V.tx += fcx - (X0 + X1) / 2;
+      V.ty += fcy - (Y0 + Y1) / 2;
+      clampPan();
+    }
+  }
+  const now = performance.now();
+  T.flash = { ids: ms.map((q) => q.id), start: now, until: now + 1600, pulse: true };
+  requestScene();
+  emit('view');
+}
+
+/** The biggest part of the rectangle `all` that `cover` leaves free (all of it when almost nothing is). */
+function uncovered(all, cover) {
+  const [x0, y0, x1, y1] = all, [c0, d0, c1, d1] = cover;
+  if (c1 <= x0 || c0 >= x1 || d1 <= y0 || d0 >= y1) return all;
+  let best = null, bestA = 0;
+  for (const p of [[x0, y0, Math.min(c0, x1), y1], [Math.max(c1, x0), y0, x1, y1], [x0, y0, x1, Math.min(d0, y1)], [x0, Math.max(d1, y0), x1, y1]]) {
+    const a = Math.max(0, p[2] - p[0]) * Math.max(0, p[3] - p[1]);
+    if (a > bestA) { bestA = a; best = p; }
+  }
+  return best && bestA >= 0.12 * (x1 - x0) * (y1 - y0) ? best : all;
 }
 
 // A small floor-plan fragment drawn under the preview tint, so the chip shows

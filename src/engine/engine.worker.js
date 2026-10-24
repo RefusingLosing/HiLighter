@@ -1586,7 +1586,7 @@ H_.exportPdf = async ({ mode, markups, legend, annots, title }, id) => {
   }
   try {
     if (title) out.setMetaData('info:Title', title);
-    out.setMetaData('info:Creator', 'PlanTint 1.6');
+    out.setMetaData('info:Creator', 'PlanTint 1.7');
   } catch { /* metadata is optional */ }
   prog(0.9, 'Compressing the PDF');
   const buf = out.saveToBuffer('compress,compress-images,compress-fonts,garbage');

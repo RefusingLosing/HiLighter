@@ -1,30 +1,43 @@
-// The markups window: every markup of the drawing in a table, in a window of its own that can sit
-// beside the drawing or on a second screen. Find markups by name, colour or status, select them (the
-// sheet shows the same selection), rename them, recolour them, set their status, units and % done,
-// zoom to them and delete them. The drawing page builds the window and keeps it up to date itself, so
-// what is done here is done in the drawing, with undo, and the other way round.
+// The markups window: every markup of the drawing in a table, in a window of its own that sits beside
+// the drawing (or on a second screen) at any size. Find markups by name, colour or status, select them
+// (the sheet shows the same selection, and brings the one clicked into view), rename them, recolour
+// them, set their status, units and % done, zoom to them, merge them (drag a row onto another) and
+// delete them. The drawing page builds the window and keeps it up to date itself, so what is done
+// here is done in the drawing, with undo, and the other way round.
 
-import { S, on, withProps, setSelection } from './state.js';
+import { S, on, withProps, setSelection as setSel } from './state.js';
 import { change } from './history.js';
 import { icon } from './ui.js';
 import { PALETTE, tintOnPaper, colorName, normalizeHex } from './colors.js';
 import { measureAt, totals } from './measure.js';
 import { hasScale, areaLabel, lengthLabel } from './units.js';
 import { STATUSES, STATUS, progressOn, progressBy, progOf, withProg } from './progress.js';
+import { mergeMarkups } from './merge.js';
 import { T } from './render.js';
 
 const NAME = 'plantint-markups';
+const FOLLOW_KEY = 'plantint.markups.follow';
 let win = null;            // the window, while it is open
-let actions = {};          // from main: zoomTo(ids), undo(), redo(), requestUI()
+let actions = {};          // from main: zoomTo(ids), reveal(ids), undo(), redo(), requestUI()
 let offs = [];             // listeners on the drawing, removed when the window closes
 let watch = 0;
 let el = {};               // the window's parts
 const rows = new Map();    // markup id -> row
-const view = { q: '', colour: null, status: null, sort: null, dir: 1 };
+const view = { q: '', colour: null, status: null, sort: null, dir: 1, follow: loadFollow() };
 let anchor = null;         // the row Shift+click selects from
 let queued = false;
 let lastShown = [];        // ids in the order the table shows them
 let colsKey = '';
+let press = null;          // a row pressed with the mouse: { id, x, y, pid, tr, deferClick }
+let fromHere = false;      // the last change of selection was made in this window
+let selKey = '';           // the selection the table last showed
+let drag = null;           // rows being dragged onto another: { ids, target, cx, cy, ghost, raf }
+
+/** Selects in the drawing from this window (a selection made on the sheet scrolls the table to it). */
+function setSelection(ids) { fromHere = true; setSel(ids); }
+
+function loadFollow() { try { return localStorage.getItem(FOLLOW_KEY) !== '0'; } catch { return true; } }
+function saveFollow(v) { try { localStorage.setItem(FOLLOW_KEY, v ? '1' : '0'); } catch { /* this session only */ } }
 
 export const markupsWindowOpen = () => !!(win && !win.closed);
 
@@ -33,7 +46,7 @@ export function openMarkupsWindow(acts) {
   actions = acts || actions;
   if (win && !win.closed) { win.focus(); return win; }
   if (!S.doc) return null;
-  const w = window.open('about:blank', NAME, 'width=1060,height=720');
+  const w = window.open('about:blank', NAME, 'width=720,height=720');
   if (!w) return null;
   win = w;
   build();
@@ -60,6 +73,8 @@ window.addEventListener('pagehide', () => closeMarkupsWindow());
 
 function cleanup() {
   if (!win && !offs.length) return;
+  endDrag(false);
+  press = null;
   for (const off of offs) off();
   offs = [];
   clearInterval(watch);
@@ -67,6 +82,7 @@ function cleanup() {
   el = {};
   win = null;
   colsKey = '';
+  selKey = '';
   if (T.hoverId) { T.hoverId = null; if (actions.requestUI) actions.requestUI(); }
 }
 
@@ -85,14 +101,14 @@ const CSS = `
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; }
-body { display: flex; flex-direction: column; background: #fff; color: var(--ink); font: 13px/1.38 var(--font); -webkit-font-smoothing: antialiased; }
+body { display: flex; flex-direction: column; background: #fff; color: var(--ink); font: 13px/1.38 var(--font); -webkit-font-smoothing: antialiased; min-width: 0; }
 button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
 :focus { outline: none; }
 :focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
 .ico { display: block; flex: 0 0 auto; }
-.mw-top { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--film); border-bottom: 1px solid var(--rule); flex-wrap: wrap; }
-.mw-find { position: relative; flex: 0 1 280px; min-width: 180px; }
+.mw-top { display: flex; align-items: center; gap: 8px 10px; padding: 10px 14px; background: var(--film); border-bottom: 1px solid var(--rule); flex-wrap: wrap; }
+.mw-find { position: relative; flex: 1 1 200px; max-width: 280px; min-width: 150px; }
 .mw-find .ico { position: absolute; left: 9px; top: 7px; color: var(--ink-3); pointer-events: none; }
 .mw-search { width: 100%; height: 30px; border: 1px solid var(--rule-2); border-radius: 6px; padding: 0 28px 0 30px; background: #fff; }
 .mw-search:focus { border-color: var(--blue); }
@@ -103,37 +119,43 @@ button { cursor: pointer; }
 .mw-chip:hover { background: var(--film); }
 .mw-chip.on { border-color: var(--blue); box-shadow: inset 0 0 0 1px var(--blue); color: var(--blue); }
 .mw-chip .n { color: var(--ink-3); }
-.mw-dot { width: 12px; height: 12px; border-radius: 3px; box-shadow: inset 0 0 0 1px rgba(0,0,0,.2); }
+.mw-dot { width: 12px; height: 12px; border-radius: 3px; box-shadow: inset 0 0 0 1px rgba(0,0,0,.2); flex: 0 0 auto; }
 .mw-label { color: var(--ink-2); font-size: 12px; }
 .mw-count { margin-left: auto; color: var(--ink-2); white-space: nowrap; }
-.mw-act { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--rule); flex-wrap: wrap; min-height: 46px; }
-.mw-act .grp { display: flex; align-items: center; gap: 5px; }
-.mw-act .sep { width: 1px; height: 22px; background: var(--rule); margin: 0 4px; }
-.mw-act.none .needs-sel { opacity: .38; pointer-events: none; }
-.mw-sel-title { font-weight: 600; min-width: 120px; }
+.mw-act { display: flex; align-items: center; gap: 6px 8px; padding: 8px 14px; border-bottom: 1px solid var(--rule); flex-wrap: wrap; min-height: 46px; }
+.mw-act .grp { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.mw-act .sep { width: 1px; height: 22px; background: var(--rule); margin: 0 2px; }
+.mw-act .spring { flex: 1 1 0; min-width: 0; }
+.mw-act.none .needs-sel, .mw-act.few .needs-two { opacity: .38; pointer-events: none; }
+.mw-sel-title { font-weight: 600; min-width: 104px; white-space: nowrap; }
 .mw-sw { width: 22px; height: 22px; border-radius: 5px; border: 1px solid rgba(0,0,0,.18); padding: 0; }
 .mw-sw:hover { transform: scale(1.08); }
 .mw-btn { height: 28px; padding: 0 10px; border: 1px solid var(--rule-2); border-radius: 6px; background: #fff; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .mw-btn:hover { background: var(--film); }
 .mw-btn.danger { color: var(--red); }
 .mw-st-btn .mw-dot { border-radius: 50%; }
-.mw-wrap { flex: 1; overflow: auto; }
+.mw-follow { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 4px; white-space: nowrap; color: var(--ink-2); cursor: pointer; user-select: none; }
+.mw-follow input { accent-color: var(--blue); margin: 0; }
+.mw-wrap { flex: 1; overflow: auto; position: relative; }
 table.mw-t { width: 100%; border-collapse: separate; border-spacing: 0; }
 .mw-t th { position: sticky; top: 0; z-index: 1; background: #fff; text-align: left; font-weight: 600; font-size: 12px; color: var(--ink-2); padding: 8px; border-bottom: 1px solid var(--rule); white-space: nowrap; user-select: none; }
 .mw-t th.sort { cursor: pointer; }
 .mw-t th.sort:hover { color: var(--ink); }
 .mw-t th .arrow { display: inline-block; width: 12px; color: var(--blue); }
 .mw-t td { padding: 3px 8px; border-bottom: 1px solid #EEF0EC; white-space: nowrap; }
-.mw-t tbody tr { cursor: default; }
+.mw-t tbody tr { cursor: default; user-select: none; }
 .mw-t tbody tr:hover td { background: #F7F8F5; }
 .mw-t tbody tr.sel td { background: var(--blue-soft); }
 .mw-t tbody tr.sel:hover td { background: var(--blue-soft-2); }
 .mw-t .num { text-align: right; font-variant-numeric: tabular-nums; }
-.mw-t .idx { color: var(--ink-3); width: 1%; }
-.mw-t .chk { width: 1%; }
-.mw-t .chk input { accent-color: var(--blue); margin: 0; }
+.mw-t .c-idx { color: var(--ink-3); width: 1%; padding-left: 2px; }
+.mw-t .c-idx .in { display: inline-flex; align-items: center; gap: 2px; }
+.mw-grip { color: var(--ink-3); opacity: 0; cursor: grab; display: inline-grid; place-items: center; width: 14px; }
+.mw-t tbody tr:hover .mw-grip, .mw-t tbody tr.sel .mw-grip { opacity: .9; }
+.mw-t .c-chk { width: 1%; }
+.mw-t .c-chk input { accent-color: var(--blue); margin: 0; }
 .mw-swb { width: 34px; height: 22px; border-radius: 5px; border: 1px solid rgba(0,0,0,.18); padding: 0; display: block; }
-.mw-name { width: 100%; min-width: 180px; height: 26px; border: 1px solid transparent; border-radius: 5px; padding: 0 6px; background: transparent; }
+.mw-name { width: 100%; min-width: 150px; height: 26px; border: 1px solid transparent; border-radius: 5px; padding: 0 6px; background: transparent; user-select: text; }
 .mw-name:hover { border-color: var(--rule); background: #fff; }
 .mw-name:focus { border-color: var(--blue); background: #fff; }
 .mw-sel { height: 26px; border: 1px solid var(--rule-2); border-radius: 5px; background: #fff; padding: 0 4px; }
@@ -144,14 +166,28 @@ table.mw-t { width: 100%; border-collapse: separate; border-spacing: 0; }
 .mw-icon.del:hover { color: var(--red); }
 .mw-empty { padding: 48px 20px; text-align: center; color: var(--ink-3); }
 .mw-foot { display: flex; gap: 14px; align-items: center; padding: 8px 14px; border-top: 1px solid var(--rule); background: var(--film); color: var(--ink-2); font-size: 12px; min-height: 38px; }
-.mw-tot { font-variant-numeric: tabular-nums; color: var(--ink); }
-.mw-msg { margin-left: auto; color: var(--ink); display: flex; gap: 8px; align-items: center; }
+.mw-tot { font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
+.mw-hint { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mw-msg { margin-left: auto; color: var(--ink); display: flex; gap: 8px; align-items: center; white-space: nowrap; }
+.mw-msg:empty { display: none; }
 .mw-link { border: 0; background: none; color: var(--blue); padding: 0; }
 .mw-link:hover { text-decoration: underline; }
 .mw-pop { position: fixed; z-index: 10; background: #fff; border: 1px solid var(--rule-2); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.18); padding: 8px; }
 .mw-pop .pal { display: grid; grid-template-columns: repeat(6, 24px); gap: 6px; }
 .mw-pop .more { margin-top: 8px; display: flex; align-items: center; gap: 6px; }
 .mw-pop input[type=color] { width: 0; height: 0; opacity: 0; border: 0; padding: 0; position: absolute; }
+/* dragging rows onto another to merge them */
+body.mw-dragging, body.mw-dragging * { cursor: grabbing !important; }
+.mw-t tbody tr.dragged td { opacity: .5; }
+.mw-t tbody tr.drop td { background: rgba(36,87,197,.18) !important; box-shadow: inset 0 2px 0 var(--blue), inset 0 -2px 0 var(--blue); }
+.mw-ghost { position: fixed; z-index: 20; pointer-events: none; display: flex; align-items: center; gap: 7px; max-width: min(460px, 80vw); padding: 6px 10px; border-radius: 7px; background: var(--ink); color: #fff; font-size: 12px; box-shadow: 0 8px 22px rgba(0,0,0,.28); white-space: nowrap; }
+.mw-ghost.ok { background: var(--blue); }
+.mw-ghost span { overflow: hidden; text-overflow: ellipsis; }
+/* a narrow window, beside the drawing */
+@media (max-width: 1000px) { .mw-act .pal-inline { display: none; } }
+@media (max-width: 860px) { .mw-st-btn .lbl { display: none; } .mw-st-btn { padding: 0 8px; } .mw-hint { display: none; } }
+@media (max-width: 700px) { .mw-act .mw-btn.icon-ok .lbl { display: none; } .mw-act .mw-btn.icon-ok { padding: 0 8px; } .mw-t .c-perim { display: none; } .mw-sel-title { min-width: 0; } }
+@media (max-width: 540px) { .mw-follow .lbl { display: none; } .mw-t .c-act { display: none; } .mw-name { min-width: 110px; } .mw-top, .mw-act { padding-left: 10px; padding-right: 10px; } }
 `;
 
 /** An element in the window's own document (like h() in ui.js). */
@@ -176,10 +212,12 @@ function E(tag, attrs, ...children) {
   return x;
 }
 
+const lbl = (text) => `<span class="lbl">${text}</span>`;
+
 function build() {
   const d = win.document;
   d.open();
-  d.write('<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Markups</title></head><body></body></html>');
+  d.write('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Markups</title></head><body></body></html>');
   d.close();
   const base = new URL('.', window.location.href).href;
   d.head.append(E('link', { rel: 'stylesheet', href: base + 'fonts.css' }), E('style', null, CSS));
@@ -196,21 +234,26 @@ function build() {
 
   // ---- what to do with the selected markups
   const selTitle = E('span', { class: 'mw-sel-title' });
-  const pal = E('div', { class: 'grp needs-sel', 'aria-label': 'Colour of the selected markups' },
+  const pal = E('div', { class: 'grp pal-inline needs-sel', 'aria-label': 'Colour of the selected markups' },
     ...PALETTE.map((p) => E('button', { class: 'mw-sw', title: p.name, 'aria-label': p.name, style: { background: p.hex }, onclick: () => recolour(selectedIds(), p.hex) })));
-  const anyColour = E('input', { type: 'color', style: { width: '0', height: '0', opacity: '0', border: '0', padding: '0', position: 'absolute' } });
-  anyColour.addEventListener('change', () => recolour(selectedIds(), anyColour.value.toUpperCase()));
-  const anyBtn = E('button', { class: 'mw-btn needs-sel', title: 'Any colour', html: icon('plus', 14) + '<span>Colour</span>', onclick: () => anyColour.click() });
+  const colourBtn = E('button', { class: 'mw-btn icon-ok needs-sel mw-colour', title: 'Colour of the selected markups', html: icon('swatch-book', 15) + lbl('Colour') });
+  colourBtn.addEventListener('click', () => colourPop(colourBtn, selectedIds()));
   const stGrp = E('div', { class: 'grp needs-sel', 'aria-label': 'Status of the selected markups' },
-    ...STATUSES.map((st) => E('button', { class: 'mw-btn mw-st-btn', title: `Set the selected markups to ${st.label}`, onclick: () => setProg(selectedIds(), { st: st.id }) },
-      E('span', { class: 'mw-dot', style: { background: st.color } }), st.label)));
+    ...STATUSES.map((st) => E('button', { class: 'mw-btn mw-st-btn', title: `Set the selected markups to ${st.label}`, 'aria-label': st.label, onclick: () => setProg(selectedIds(), { st: st.id }) },
+      E('span', { class: 'mw-dot', style: { background: st.color } }), E('span', { class: 'lbl' }, st.label))));
   const stSep = E('span', { class: 'sep' });
-  const zoomBtn = E('button', { class: 'mw-btn needs-sel', html: icon('locate', 15) + '<span>Zoom to</span>', title: 'Show the selected markups on the sheet', onclick: () => zoomTo(selectedIds()) });
-  const delBtn = E('button', { class: 'mw-btn danger needs-sel', html: icon('trash-2', 15) + '<span>Delete</span>', onclick: () => remove(selectedIds()) });
+  const zoomBtn = E('button', { class: 'mw-btn icon-ok needs-sel', html: icon('locate', 15) + lbl('Zoom to'), title: 'Zoom the sheet to the selected markups', 'aria-label': 'Zoom to', onclick: () => zoomTo(selectedIds()) });
+  const mergeBtn = E('button', { class: 'mw-btn needs-two mw-merge', html: icon('squares-unite', 15) + lbl('Merge'), 'aria-label': 'Merge', onclick: () => mergeSelectedHere() });
+  const delBtn = E('button', { class: 'mw-btn icon-ok danger needs-sel', html: icon('trash-2', 15) + lbl('Delete'), title: 'Delete the selected markups', 'aria-label': 'Delete', onclick: () => remove(selectedIds()) });
+  const followBox = E('input', { type: 'checkbox' });
+  followBox.checked = view.follow;
+  followBox.addEventListener('change', () => { view.follow = followBox.checked; saveFollow(view.follow); });
+  const followLbl = E('label', { class: 'mw-follow', title: 'A click on a row brings its markup into view on the drawing, beside this window, and makes it flash' },
+    followBox, E('span', { html: icon('scan-eye', 15) }), E('span', { class: 'lbl' }, 'Show on drawing'));
   const allBtn = E('button', { class: 'mw-btn', title: 'Select every markup shown in the table (Ctrl+A)', onclick: () => selectShown() }, 'Select all');
   const noneBtn = E('button', { class: 'mw-btn needs-sel', title: 'Select nothing (Esc)', onclick: () => setSelection([]) }, 'Clear');
-  const act = E('div', { class: 'mw-act' }, selTitle, pal, anyBtn, anyColour, stSep, stGrp, E('span', { class: 'sep' }), zoomBtn, delBtn,
-    E('span', { style: { flex: '1' } }), allBtn, noneBtn);
+  const act = E('div', { class: 'mw-act' }, selTitle, pal, colourBtn, stSep, stGrp, E('span', { class: 'sep' }), zoomBtn, mergeBtn, delBtn,
+    E('span', { class: 'spring' }), followLbl, allBtn, noneBtn);
 
   // ---- the table
   const thead = E('thead');
@@ -221,16 +264,23 @@ function build() {
 
   // ---- foot: totals, hints and messages
   const tot = E('span', { class: 'mw-tot' });
-  const hint = E('span', null, 'Click a row to select it on the sheet; Ctrl+click adds, Shift+click selects a range. Double-click zooms to it.');
+  const hint = E('span', { class: 'mw-hint' }, 'Click a row to select it; Ctrl+click adds, Shift+click selects a range. Drag a row onto another to merge them. Double-click zooms to it.');
   const msg = E('span', { class: 'mw-msg' });
   const foot = E('div', { class: 'mw-foot' }, tot, hint, msg);
 
   d.body.append(top, act, wrap, foot);
-  el = { search, colours, statuses, count, selTitle, act, stGrp, stSep, thead, tbody, table, empty, wrap, tot, msg };
+  el = { search, colours, statuses, count, selTitle, act, stGrp, stSep, mergeBtn, followBox, thead, tbody, table, empty, wrap, tot, msg };
 
   d.addEventListener('keydown', onKey);
   d.addEventListener('pointerdown', (e) => { if (el.pop && !el.pop.contains(e.target)) closePop(); }, true);
-  win.addEventListener('blur', () => { if (T.hoverId) { T.hoverId = null; actions.requestUI && actions.requestUI(); } });
+  d.addEventListener('pointermove', onPressMove);
+  d.addEventListener('pointerup', onPressUp);
+  d.addEventListener('pointercancel', () => { endDrag(false); press = null; });
+  win.addEventListener('blur', () => {
+    endDrag(false);
+    press = null;
+    if (T.hoverId) { T.hoverId = null; actions.requestUI && actions.requestUI(); }
+  });
 }
 
 // ------------------------------------------------------------------ what the table shows
@@ -304,7 +354,13 @@ function refresh() {
     if (want !== r.tr) el.tbody.insertBefore(r.tr, want);
     prev = r.tr;
   }
-  // selection
+  // selection: one made on the sheet brings its row into view
+  const key2 = [...S.selection].join();
+  if (key2 !== selKey) {
+    selKey = key2;
+    if (!fromHere) { const id = lastShown.find((q) => S.selection.has(q)); if (id) scrollToRow(rows.get(id).tr); }
+  }
+  fromHere = false;
   const nSel = S.markups.filter((m) => S.selection.has(m.id)).length;
   const shownSel = lastShown.filter((id) => S.selection.has(id)).length;
   if (el.all) {
@@ -312,7 +368,12 @@ function refresh() {
     el.all.indeterminate = shownSel > 0 && shownSel < lastShown.length;
   }
   el.act.classList.toggle('none', nSel === 0);
+  el.act.classList.toggle('few', nSel < 2);
   el.selTitle.textContent = nSel ? `${nSel} selected` : 'Nothing selected';
+  const into = nSel >= 2 ? S.markups.find((m) => m.id === mergeTarget()) : null;
+  el.mergeBtn.title = into
+    ? `Merge the ${nSel} selected markups into “${short(into.name)}” (the first selected in the table), which keeps its name, colour and status (Ctrl+M). Or drag a row onto another.`
+    : 'Merge markups into one: select two or more, or drag a row onto another';
   el.stGrp.hidden = el.stSep.hidden = !progressOn();
   const n = S.markups.length;
   el.count.textContent = `${n} markup${n === 1 ? '' : 's'}` + (lastShown.length !== n ? ` · ${lastShown.length} shown` : '');
@@ -336,13 +397,13 @@ function renderHead(cols) {
     if (c.id === 'chk') {
       el.all = E('input', { type: 'checkbox', 'aria-label': 'Select all shown', title: 'Select all shown (Ctrl+A)' });
       el.all.addEventListener('change', () => (el.all.checked ? selectShown() : setSelection(S.markups.filter((m) => S.selection.has(m.id) && !lastShown.includes(m.id)).map((m) => m.id))));
-      tr.append(E('th', { class: 'chk' }, el.all));
+      tr.append(E('th', { class: 'c-chk' }, el.all));
       continue;
     }
-    if (c.id === 'act') { tr.append(E('th')); continue; }
+    if (c.id === 'act') { tr.append(E('th', { class: 'c-act' })); continue; }
     const on_ = view.sort === c.sort || (!view.sort && c.sort === 'idx');
     const arrow = E('span', { class: 'arrow' }, on_ ? (view.dir > 0 ? '▲' : '▼') : '');
-    const th = E('th', { class: 'sort' + (c.num ? ' num' : ''), title: c.title || `Sort by ${c.label.toLowerCase()}` }, c.label, ' ', arrow);
+    const th = E('th', { class: `sort c-${c.id}` + (c.num ? ' num' : ''), title: c.title || `Sort by ${c.label.toLowerCase()}` }, c.label, ' ', arrow);
     th.addEventListener('click', () => {
       if (view.sort === c.sort || (!view.sort && c.sort === 'idx')) view.dir = -view.dir;
       else { view.sort = c.sort; view.dir = 1; }
@@ -401,13 +462,16 @@ function rowFor(m, cols) {
     if (c.id === 'chk') {
       const cb = E('input', { type: 'checkbox', 'aria-label': 'Selected' });
       cb.addEventListener('click', (e) => { e.stopPropagation(); toggle(id); });
-      td = E('td', { class: 'chk' }, cb);
+      td = E('td', null, cb);
       r.cells.chk = cb;
     } else if (c.id === 'idx') {
-      td = E('td', { class: 'idx num' });
+      // the grip: drag the row onto another to merge them
+      const n = E('span', { class: 'n' });
+      td = E('td', { class: 'num' }, E('span', { class: 'in' }, E('span', { class: 'mw-grip', title: 'Drag onto another markup to merge them', html: icon('grip-vertical', 14) }), n));
+      r.cells.idxN = n;
     } else if (c.id === 'colour') {
       const b = E('button', { class: 'mw-swb', title: 'Change the colour' });
-      b.addEventListener('click', (e) => { e.stopPropagation(); colourPop(b, id); });
+      b.addEventListener('click', (e) => { e.stopPropagation(); colourPop(b, S.selection.has(id) ? selectedIds() : [id]); });
       td = E('td', null, b);
       r.cells.colour = b;
     } else if (c.id === 'name') {
@@ -445,19 +509,28 @@ function rowFor(m, cols) {
     } else {
       td = E('td', { class: c.num ? 'num' : '' });
     }
+    td.classList.add('c-' + c.id);
     r.cells['td_' + c.id] = td;
     tr.append(td);
   }
   tr.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || e.target.closest('button, input, select')) return;
-    clickRow(id, e);
+    pressRow(id, e, tr);
   });
   tr.addEventListener('dblclick', (e) => { if (!e.target.closest('button, input, select')) zoomTo([id]); });
-  tr.addEventListener('pointerenter', () => { T.hoverId = id; actions.requestUI && actions.requestUI(); });
-  tr.addEventListener('pointerleave', () => { if (T.hoverId === id) { T.hoverId = null; actions.requestUI && actions.requestUI(); } });
+  tr.addEventListener('pointerenter', () => { if (drag) return; T.hoverId = id; actions.requestUI && actions.requestUI(); });
+  tr.addEventListener('pointerleave', () => { if (drag) return; if (T.hoverId === id) { T.hoverId = null; actions.requestUI && actions.requestUI(); } });
   r.tr = tr;
   rows.set(id, r);
   return r;
+}
+
+/** Scrolls the table just enough to show a row (clear of the column titles). */
+function scrollToRow(tr) {
+  const wrap = el.wrap, head = el.thead.offsetHeight;
+  const top = tr.offsetTop, bottom = top + tr.offsetHeight;
+  if (top < wrap.scrollTop + head) wrap.scrollTop = Math.max(0, top - head - 4);
+  else if (bottom > wrap.scrollTop + wrap.clientHeight) wrap.scrollTop = bottom - wrap.clientHeight + 4;
 }
 
 function setText(r, key, text) {
@@ -471,7 +544,8 @@ function updateRow(r, m, i, cols) {
   const sel = S.selection.has(m.id);
   r.tr.classList.toggle('sel', sel);
   if (r.cells.chk.checked !== sel) r.cells.chk.checked = sel;
-  setText(r, 'idx', String(i + 1));
+  const idx = String(i + 1);
+  if (r.vals.idx !== idx) { r.vals.idx = idx; r.cells.idxN.textContent = idx; }
   const bg = tintOnPaper(m.color, Math.max(m.opacity, 0.35));
   if (r.vals.bg !== bg) { r.vals.bg = bg; r.cells.colour.style.background = bg; r.cells.colour.title = `${colorName(m.color)} ${m.color.toUpperCase()}: change the colour`; }
   if (d.activeElement !== r.cells.name && r.cells.name.value !== (m.name || '')) r.cells.name.value = m.name || '';
@@ -497,6 +571,7 @@ function updateRow(r, m, i, cols) {
 // ------------------------------------------------------------------ selecting
 
 const selectedIds = () => S.markups.filter((m) => S.selection.has(m.id)).map((m) => m.id);
+const short = (s) => { const t = String(s || ''); return t.length > 32 ? t.slice(0, 31) + '…' : t; };
 
 function clickRow(id, e) {
   if (e.shiftKey && anchor && lastShown.includes(anchor)) {
@@ -518,6 +593,114 @@ function toggle(id) {
 }
 
 function selectShown() { setSelection([...lastShown]); }
+
+/** Shows on the drawing the markup of a row just clicked (with Show on drawing ticked). */
+function follow(id) {
+  if (view.follow && S.selection.has(id) && actions.reveal) actions.reveal([id]);
+}
+
+// ------------------------------------------------------------------ pressing and dragging rows
+
+function pressRow(id, e, tr) {
+  endDrag(false);
+  const plain = !e.shiftKey && !e.ctrlKey && !e.metaKey;
+  // a plain press on one row of a selection of several may be the start of dragging them all: the
+  // click that selects that row alone waits until the button comes up without a drag
+  const deferClick = plain && S.selection.has(id) && selectedIds().length > 1;
+  if (!deferClick) clickRow(id, e);
+  press = { id, x: e.clientX, y: e.clientY, pid: e.pointerId, tr, deferClick };
+  try { tr.setPointerCapture(e.pointerId); } catch { /* the document still hears the moves */ }
+}
+
+function onPressMove(e) {
+  if (!press || e.pointerId !== press.pid) return;
+  if (!drag) {
+    if (Math.hypot(e.clientX - press.x, e.clientY - press.y) < 6) return;
+    startDrag();
+  }
+  drag.cx = e.clientX;
+  drag.cy = e.clientY;
+  dragOver();
+}
+
+function onPressUp(e) {
+  if (!press || e.pointerId !== press.pid) return;
+  const p = press;
+  press = null;
+  if (drag) { endDrag(true); return; }
+  if (p.deferClick) clickRow(p.id, { shiftKey: false, ctrlKey: false, metaKey: false });
+  follow(p.id);
+}
+
+function startDrag() {
+  const ids = S.selection.has(press.id) ? selectedIds() : [press.id];
+  const ghost = E('div', { class: 'mw-ghost' });
+  win.document.body.append(ghost);
+  win.document.body.classList.add('mw-dragging');
+  drag = { ids: new Set(ids), target: null, cx: press.x, cy: press.y, ghost, raf: 0 };
+  for (const id of ids) { const r = rows.get(id); if (r) r.tr.classList.add('dragged'); }
+  drag.raf = win.requestAnimationFrame(autoScroll);
+}
+
+/** Under the pointer: the row to merge into, if any; the label by the pointer says what will happen. */
+function dragOver() {
+  const g = drag;
+  if (!g || !win) return;
+  const hit = win.document.elementFromPoint(g.cx, g.cy);
+  const tr = hit && hit.closest ? hit.closest('tbody tr[data-id]') : null;
+  const id = tr ? tr.getAttribute('data-id') : null;
+  const target = id && !g.ids.has(id) && S.markups.some((m) => m.id === id) ? id : null;
+  if (target !== g.target) {
+    if (g.target && rows.get(g.target)) rows.get(g.target).tr.classList.remove('drop');
+    g.target = target;
+    if (target && rows.get(target)) rows.get(target).tr.classList.add('drop');
+    T.hoverId = target;
+    actions.requestUI && actions.requestUI();
+  }
+  const list = S.markups.filter((m) => g.ids.has(m.id));
+  const what = list.length > 1 ? `${list.length} markups` : `“${short(list[0] && list[0].name)}”`;
+  const into = target ? S.markups.find((m) => m.id === target) : null;
+  const sw = into || list[0];
+  g.ghost.innerHTML = '';
+  if (sw) g.ghost.append(E('span', { class: 'mw-dot', style: { background: tintOnPaper(sw.color, Math.max(sw.opacity, 0.35)) } }));
+  g.ghost.append(E('span', null, into ? `Merge ${what} into “${short(into.name)}”` : `${what}: drop on another markup to merge`));
+  g.ghost.classList.toggle('ok', !!into);
+  const gw = g.ghost.offsetWidth, gh = g.ghost.offsetHeight;
+  g.ghost.style.left = Math.max(4, Math.min(win.innerWidth - gw - 4, g.cx + 16)) + 'px';
+  g.ghost.style.top = (g.cy + 18 + gh > win.innerHeight ? g.cy - gh - 12 : g.cy + 18) + 'px';
+}
+
+/** Near the top or the bottom of the table the rows scroll, so a row far away can be reached. */
+function autoScroll() {
+  if (!drag || !win) return;
+  const wr = el.wrap.getBoundingClientRect();
+  const head = el.thead.getBoundingClientRect().height;
+  const zone = 34;
+  let v = 0;
+  if (drag.cy < wr.top + head + zone) v = -Math.ceil((wr.top + head + zone - drag.cy) / 3);
+  else if (drag.cy > wr.bottom - zone) v = Math.ceil((drag.cy - (wr.bottom - zone)) / 3);
+  if (v) {
+    const before = el.wrap.scrollTop;
+    el.wrap.scrollTop = before + Math.max(-40, Math.min(40, v));
+    if (el.wrap.scrollTop !== before) dragOver();
+  }
+  drag.raf = win.requestAnimationFrame(autoScroll);
+}
+
+function endDrag(commit) {
+  const g = drag;
+  if (!g) return;
+  drag = null;
+  if (win && !win.closed) {
+    win.cancelAnimationFrame(g.raf);
+    g.ghost.remove();
+    win.document.body.classList.remove('mw-dragging');
+  }
+  for (const r of rows.values()) r.tr.classList.remove('dragged', 'drop');
+  T.hoverId = null;
+  actions.requestUI && actions.requestUI();
+  if (commit && g.target) mergeInto([...g.ids], g.target);
+}
 
 // ------------------------------------------------------------------ changing markups (one undo step each)
 
@@ -560,6 +743,27 @@ function remove(ids) {
   say(n > 1 ? `Deleted ${n} markups.` : 'Deleted 1 markup.', 'Undo', () => actions.undo && actions.undo());
 }
 
+/** The markup the selection merges into with the Merge button: the first selected in the table. */
+function mergeTarget() {
+  return lastShown.find((id) => S.selection.has(id)) || selectedIds()[0] || null;
+}
+
+function mergeSelectedHere() {
+  const ids = selectedIds();
+  if (ids.length < 2) { say('Select two or more markups to merge them, or drag a row onto another.'); return; }
+  mergeInto(ids, mergeTarget());
+}
+
+/** Merges markups into one of them; neighbours become one area, the line between them included. */
+function mergeInto(ids, intoId) {
+  fromHere = true;
+  const res = mergeMarkups(ids, intoId);
+  if (!res) return;
+  anchor = res.into.id;
+  say(`Merged ${res.n} markups into “${short(res.into.name)}”.`, 'Undo', () => actions.undo && actions.undo());
+  if (view.follow && actions.reveal) actions.reveal([res.into.id]);
+}
+
 function zoomTo(ids) { if (ids.length && actions.zoomTo) actions.zoomTo(ids); }
 
 /** A message in the foot of the window, with an optional action (such as Undo). */
@@ -572,12 +776,12 @@ function say(text, actLabel = null, fn = null) {
   el.msgTimer = setTimeout(() => { if (el.msg) el.msg.innerHTML = ''; }, 7000);
 }
 
-// ------------------------------------------------------------------ the colour of one markup
+// ------------------------------------------------------------------ colours
 
-function colourPop(anchorEl, id) {
+/** The palette (and any colour) for the markups `ids`, under the button that opened it. */
+function colourPop(anchorEl, ids) {
   closePop();
-  // a selected markup changes together with the rest of the selection
-  const ids = S.selection.has(id) ? selectedIds() : [id];
+  if (!ids.length) return;
   const any = E('input', { type: 'color' });
   any.addEventListener('change', () => { recolour(ids, any.value.toUpperCase()); closePop(); });
   const pop = E('div', { class: 'mw-pop', role: 'dialog', 'aria-label': 'Colour' },
@@ -602,6 +806,7 @@ function onKey(e) {
   const typing = e.target && e.target.closest && e.target.closest('input:not([type=checkbox]), select, textarea');
   const ctrl = e.ctrlKey || e.metaKey;
   if (e.key === 'Escape') {
+    if (drag) { e.preventDefault(); endDrag(false); press = null; return; }
     if (el.pop) { closePop(); return; }
     if (typing === el.search && view.q) { el.search.value = ''; view.q = ''; later(); return; }
     if (!typing) setSelection([]);
@@ -613,6 +818,7 @@ function onKey(e) {
   else if (ctrl && k === 'z' && !e.shiftKey) { e.preventDefault(); actions.undo && actions.undo(); }
   else if (ctrl && (k === 'y' || (k === 'z' && e.shiftKey))) { e.preventDefault(); actions.redo && actions.redo(); }
   else if (ctrl && k === 'f') { e.preventDefault(); el.search.focus(); el.search.select(); }
+  else if (ctrl && (k === 'm' || e.code === 'KeyM')) { e.preventDefault(); mergeSelectedHere(); }
   else if (ctrl && k === 'w') { e.preventDefault(); win.close(); }
   else if (e.key === 'Delete') { e.preventDefault(); remove(selectedIds()); }
   else if (e.key === 'F2') {

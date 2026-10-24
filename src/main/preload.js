@@ -27,4 +27,5 @@ contextBridge.exposeInMainWorld('plantint', {
   recoveryWrite: (bytes, meta) => ipcRenderer.invoke('recovery:write', bytes, meta),
   recoveryRead: () => ipcRenderer.invoke('recovery:read'),
   recoveryClear: () => ipcRenderer.invoke('recovery:clear'),
+  markupsCover: () => ipcRenderer.invoke('markups:cover'),
 });
