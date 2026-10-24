@@ -126,59 +126,6 @@ export function offsetRings(rings, delta) {
   return fromPaths(sol);
 }
 
-/** Where two shapes overlap -> rings. */
-export function intersectRings(a, b) {
-  if (!a.length || !b.length) return [];
-  return fromPaths(execEvenOdd(ClipperLib.ClipType.ctIntersection, toPaths(a), toPaths(b)));
-}
-
-const boxesMeet = (a, b) => !(a[2] < b[0] || a[0] > b[2] || a[3] < b[1] || a[1] > b[3]);
-
-/**
- * Several shapes as one: their union, with the narrow gaps between neighbours filled in (the line or
- * the writing that kept them apart, up to 2 × reach wide), so neighbours become one continuous shape.
- * Only gaps that lie between two of the shapes are filled: each shape's own outline, its notches and
- * its holes stay as they were, and shapes further apart stay apart (as parts of the one shape).
- */
-export function mergeRings(list, reach) {
-  const shapes = list.filter((r) => r && r.length);
-  const all = unionMany(shapes);
-  if (shapes.length < 2 || !(reach > 0) || !all.length) return all;
-  // closing (grow, then shrink back): fills every gap narrower than 2 × reach, nothing else changes
-  const closed = offsetRings(offsetRings(all, reach), -reach);
-  const gaps = difference(closed, [all]);
-  if (!gaps.length) return all;
-  // ...of which only the parts within reach of two different shapes are gaps between neighbours
-  const grown = shapes.map((r) => offsetRings(r, 2 * reach));
-  const boxes = grown.map(ringsBBox);
-  const between = [];
-  for (let i = 0; i < shapes.length; i++) {
-    for (let j = i + 1; j < shapes.length; j++) {
-      if (!boxesMeet(boxes[i], boxes[j])) continue;
-      const both = intersectRings(grown[i], grown[j]);
-      if (both.length) between.push(both);
-    }
-  }
-  if (!between.length) return all;
-  const bridges = intersectRings(gaps, unionMany(between));
-  return bridges.length ? withoutSpecks(unionMany([all, bridges])) : all;
-}
-
-/** Leaves out specks (parts and holes under 1 px²) that rounding can leave along an outline. */
-function withoutSpecks(rings) {
-  const out = [];
-  let dropped = false;
-  for (const p of pieces(rings)) {
-    if (p.area < 1) { dropped = true; continue; }
-    out.push(p.rings[0]);
-    for (const hole of p.rings.slice(1)) {
-      if (Math.abs(signedArea(hole)) < 1) dropped = true;
-      else out.push(hole);
-    }
-  }
-  return dropped ? out : rings;
-}
-
 function treeOf(rings) {
   const c = new ClipperLib.Clipper();
   c.AddPaths(toPaths(rings), ClipperLib.PolyType.ptSubject, true);

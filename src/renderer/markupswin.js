@@ -754,7 +754,7 @@ function mergeSelectedHere() {
   mergeInto(ids, mergeTarget());
 }
 
-/** Merges markups into one of them; neighbours become one area, the line between them included. */
+/** Merges markups into one of them: one markup, each area keeping its own shape. */
 function mergeInto(ids, intoId) {
   fromHere = true;
   const res = mergeMarkups(ids, intoId);

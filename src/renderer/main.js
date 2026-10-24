@@ -21,7 +21,6 @@ import { setTypedScale, resetScale } from './scale.js';
 import * as measure from './measure.js';
 import * as annot from './annot.js';
 import * as units from './units.js';
-import * as G from './geom.js';
 
 const $ = (id) => document.getElementById(id);
 /** What the markups window can ask of the drawing. */
@@ -433,7 +432,7 @@ async function start() {
     if (f) openFile(f, true);
   }
   startRecovery();
-  window.__plantint = { S, V, T, hooks, setTool, fit, emit, engine, legendRect, covers: { syncCovers, coversIdle }, markupsWin: { open: () => openMarkupsWindow(windowActions()), isOpen: markupsWindowOpen }, merge: { mergeSelected, mergeRings: G.mergeRings }, revealIds, writeRecovery, measure, annot, units, legend: { legendLayout, legendRows, legendRect }, progress: { progressSummary, progOf }, pins: { pinSize, PIN_MIN_CSS } }; // used by the automated tests
+  window.__plantint = { S, V, T, hooks, setTool, fit, emit, engine, legendRect, covers: { syncCovers, coversIdle }, markupsWin: { open: () => openMarkupsWindow(windowActions()), isOpen: markupsWindowOpen }, merge: { mergeSelected }, revealIds, writeRecovery, measure, annot, units, legend: { legendLayout, legendRows, legendRect }, progress: { progressSummary, progOf }, pins: { pinSize, PIN_MIN_CSS } }; // used by the automated tests
 }
 
 start();

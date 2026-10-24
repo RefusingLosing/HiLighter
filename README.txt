@@ -1,18 +1,24 @@
-PlanTint 1.7.1
+PlanTint 1.7.2
 Highlighting and measuring for architectural and technical drawings.
 
 INSTALL
-  PlanTint-Setup-1.7.1.exe
+  PlanTint-Setup-1.7.2.exe
       Installs for your Windows user only (no admin rights needed), adds Start menu and
       desktop shortcuts, and opens .plantint project files when you double-click them.
       Recommended. Installing over an earlier version keeps your settings.
 
-  PlanTint-1.7.1-portable.exe
+  PlanTint-1.7.2-portable.exe
       One file, nothing installed. It unpacks itself each time, so it starts a few
       seconds slower than the installed version.
 
   The program is not code-signed, so Windows may show "Windows protected your PC".
   Click "More info", then "Run anyway".
+
+WHAT'S NEW IN 1.7.2
+  Merging no longer fills anything in between: merged areas keep their own shapes and become
+  one markup, with one name, one colour, one row in the list and the legend, and one total
+  area. (A building split by its number is still joined into one area by Fill: Shift+click
+  its other side.)
 
 WHAT'S NEW IN 1.7.1
   The installer's progress bar fills once, from start to finish. Before, it filled while the
@@ -27,11 +33,9 @@ WHAT'S NEW IN 1.7: MERGING, AND THE MARKUPS WINDOW BESIDE THE DRAWING
        table), right-click one of them on the sheet (Merge into that one), or press Ctrl+M
        (into the one selected first).
      - The one merged into keeps its name, colour, status and place in the drawing order.
-     - Neighbours become one continuous area: the line or the writing between them (up to
-       1.2 mm wide on the sheet) is filled in, so a building split by its number, or plots
-       with a line between them, become one. Their outlines stay as they were.
-     - Areas further apart stay where they are, as parts of one markup (one name, one
-       total area).
+     - Each area keeps its own shape; nothing is filled in between them. Together they are
+       one markup: one name, one colour, one row in the list and the legend, one total area
+       (where areas overlap, the overlap counts once).
      - It is one step: Ctrl+Z, or Undo in the message, brings them back as they were.
   2. The markups window beside the drawing.
      - It opens over the right part of PlanTint's window, so most of the sheet stays in
@@ -297,4 +301,4 @@ LICENCES
   PlanTint uses Electron (MIT), MuPDF (AGPL-3.0), Clipper (Boost), UTIF (MIT),
   fflate (MIT), IBM Plex fonts (SIL OFL) and Lucide icons (ISC).
   Because MuPDF is AGPL, the complete source of this program is included in
-  PlanTint-1.7.1-source.zip.
+  PlanTint-1.7.2-source.zip.

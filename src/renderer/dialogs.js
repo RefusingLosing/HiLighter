@@ -500,6 +500,6 @@ export function showHelp() {
     h('div', { class: 'help-grid' }, ...rows.map(([t, items]) => h('section', null,
       h('h3', null, t),
       h('dl', null, ...items.flatMap(([k, v]) => [h('dt', null, h('kbd', null, k)), h('dd', null, v)]))))),
-    h('p', { class: 'about' }, 'PlanTint 1.7.1. Built with Electron, MuPDF (AGPL), Clipper, UTIF, fflate, IBM Plex fonts (OFL) and Lucide icons (ISC). The full source is included with this copy.'));
+    h('p', { class: 'about' }, 'PlanTint 1.7.2. Built with Electron, MuPDF (AGPL), Clipper, UTIF, fflate, IBM Plex fonts (OFL) and Lucide icons (ISC). The full source is included with this copy.'));
   return modal({ title: 'Keys and mouse', body, wide: true, buttons: [{ label: 'Close', value: true, primary: true }] });
 }

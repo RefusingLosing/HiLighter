@@ -1,6 +1,7 @@
 // 1.7: merging markups, and the markups window beside the drawing.
 // - Merge: on the sheet (right-click "Merge into", Ctrl+M) and in the markups window (drag a row onto
-//   another, or the Merge button). Neighbours become one area with the line between them filled in;
+//   another, or the Merge button). The areas become one markup and keep their own shapes: nothing is
+//   filled in between them;
 //   areas apart become parts of one markup. The one merged into keeps its name, colour and status.
 // - The window opens beside the drawing, above PlanTint's window, resizable, works narrow, comes back
 //   where it was left, hides with its tab; a click on a row brings the markup into view beside it.
@@ -46,7 +47,7 @@ const state = (page) => S_(page, () => {
 const selection = (page) => S_(page, () => [...window.__plantint.S.selection]);
 const centre = (id) => { const r = AREAS.find((a) => a.id === id).rings[0]; return [(r[0] + r[2]) / 2, (r[1] + r[5]) / 2]; };
 const near = (a, b, tol) => Math.abs(a - b) <= tol;
-const A = 600 * 400, B = 592 * 400, C = 360 * 400, D = 400 * 400, LINE = 8 * 400;
+const A = 600 * 400, B = 592 * 400, C = 360 * 400, D = 400 * 400;
 
 async function openWindow(app, page) {
   const popP = app.waitForEvent('window', { timeout: 15000 });
@@ -107,7 +108,7 @@ async function dragRow(pop, fromName, toName, { drop = true } = {}) {
     let st = await state(page);
     const m = st.find((q) => q.id === 'mB');
     check(st.length === 3 && m && m.name === 'Room 2' && m.color === '#3FA7E0', `they become one markup, named and coloured as the one clicked (${st.map((q) => q.name).join(', ')})`, R);
-    check(m && near(m.area, A + B + LINE, 4) && m.parts === 1, `neighbours become one area, the line between them filled in (${m && Math.round(m.area)} px² = ${A} + ${B} + ${LINE})`, R);
+    check(m && near(m.area, A + B, 2) && m.parts === 2, `each keeps its shape: the line between the neighbours is not filled (${m && Math.round(m.area)} px² = ${A} + ${B}, ${m && m.parts} parts)`, R);
     check(JSON.stringify(await selection(page)) === '["mB"]', 'the merged markup is selected', R);
     check(/Merged 2 markups into “Room 2”/.test(await page.textContent('.toasts')), 'a message says what was merged, with Undo', R);
     await page.screenshot({ path: OUT + '/t12_merged_sheet.png' });
@@ -172,8 +173,8 @@ async function dragRow(pop, fromName, toName, { drop = true } = {}) {
       for (const r of m.rings) for (let i = 0; i < r.length; i += 2) { b[0] = Math.min(b[0], r[i]); b[2] = Math.max(b[2], r[i]); b[1] = Math.min(b[1], r[i + 1]); b[3] = Math.max(b[3], r[i + 1]); }
       return { n: t.S.markups.length, outer: m.rings.filter((r) => { let a = 0; for (let i = 0; i < r.length; i += 2) { const j = (i + 2) % r.length; a += r[i] * r[j + 1] - r[j] * r[i + 1]; } return Math.abs(a) > 400; }).length, inside, b: b.map(Math.round) };
     });
-    check(res.n === 1 && res.inside, `the two filled sides of a building merge into one, its number included (${res.n} markup)`, R);
-    check(res.b[0] >= 226 && res.b[2] <= 384 && res.b[1] >= 146 && res.b[3] <= 264, `and the merged area stays inside the building (${res.b.join(', ')})`, R);
+    check(res.n === 1 && res.outer === 2 && !res.inside, `the two filled sides of a building become one markup in two parts; the number between them is not filled (${res.n} markup, ${res.outer} parts)`, R);
+    check(res.b[0] >= 226 && res.b[2] <= 384 && res.b[1] >= 146 && res.b[3] <= 264, `and it stays inside the building (${res.b.join(', ')})`, R);
     await page.screenshot({ path: OUT + '/t12_building.png' });
     allErrors = allErrors.concat(errors);
   } catch (e) {
@@ -217,8 +218,8 @@ async function dragRow(pop, fromName, toName, { drop = true } = {}) {
     await pop.waitForTimeout(250);
     let st = await state(page);
     let m = st.find((q) => q.id === 'mB');
-    check(st.length === 3 && m && m.name === 'Room 2' && m.color === '#3FA7E0' && near(m.area, A + B + LINE, 4),
-      `dropping Room 1 on Room 2 merges it into Room 2, the line between them filled in (${st.map((q) => q.name).join(', ')}; ${m && Math.round(m.area)} px²)`, R);
+    check(st.length === 3 && m && m.name === 'Room 2' && m.color === '#3FA7E0' && near(m.area, A + B, 2) && m.parts === 2,
+      `dropping Room 1 on Room 2 merges it into Room 2, both keeping their shapes (${st.map((q) => q.name).join(', ')}; ${m && Math.round(m.area)} px²)`, R);
     check(JSON.stringify(await rowNames(pop)) === JSON.stringify(['Room 2', 'Store', 'Far']), 'the window shows the merged markup in its place', R);
     check(/Merged 2 markups into “Room 2”/.test(await pop.textContent('.mw-msg')), 'and says so, with Undo', R);
     await pop.locator('.mw-msg .mw-link', { hasText: 'Undo' }).click();

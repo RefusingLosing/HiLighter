@@ -25,7 +25,7 @@ LAYOUT
                      reports (reports.js); highlights covering colour already on the drawing
                      (covers.js); the markups window, a window of its own that the drawing
                      page fills in and keeps up to date (markupswin.js); merging markups
-                     (merge.js, with geom.js mergeRings)
+                     (merge.js)
   src/engine/        a Web Worker that owns the drawing's pixels: renders PDFs with MuPDF,
                      decodes pictures, fill, painted-colour search (detect.js), colour
                      removal (imgproc.js unpaint), snapping (a PDF's own line geometry,

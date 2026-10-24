@@ -1696,7 +1696,7 @@ const shortName = (s) => { const t = String(s || ''); return t.length > 28 ? t.s
 
 /**
  * Merges the selected markups into one: into `intoId` (the one right-clicked), or else into the one
- * selected first. Neighbours become one area, the line between them included.
+ * selected first. Each keeps its shape; they become one markup (one name, colour and legend row).
  */
 export function mergeSelected(intoId = null) {
   const sel = selectedMarkups();
