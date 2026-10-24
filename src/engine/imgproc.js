@@ -430,6 +430,39 @@ export function reduce2x(src, sw, sh, dst, dw, rx0, ry0, rx1, ry1) {
   }
 }
 
+/**
+ * reduce2x reading from part of the source picture: src holds columns [ox, ox + bw) and rows
+ * [oy, oy + bh) of an sw x sh picture, and must include every pixel the destination rows need.
+ */
+export function reduce2xFrom(src, bw, ox, oy, sw, sh, dst, dw, rx0, ry0, rx1, ry1) {
+  for (let y = ry0; y < ry1; y++) {
+    const sy0 = 2 * y - oy, sy1 = Math.min(2 * y + 1, sh - 1) - oy;
+    for (let x = rx0; x < rx1; x++) {
+      const sx0 = 2 * x - ox, sx1 = Math.min(2 * x + 1, sw - 1) - ox;
+      const a = (sy0 * bw + sx0) << 2, b = (sy0 * bw + sx1) << 2, c = (sy1 * bw + sx0) << 2, d = (sy1 * bw + sx1) << 2;
+      const o = (y * dw + x) << 2;
+      for (let ch = 0; ch < 3; ch++) {
+        const v0 = src[a + ch], v1 = src[b + ch], v2 = src[c + ch], v3 = src[d + ch];
+        let mn = v0 < v1 ? v0 : v1;
+        const m2 = v2 < v3 ? v2 : v3;
+        if (m2 < mn) mn = m2;
+        dst[o + ch] = (((v0 + v1 + v2 + v3) >> 2) + mn) >> 1;
+      }
+      dst[o + 3] = 255;
+    }
+  }
+}
+
+/** A copy of the rectangle (x0, y0, w, h) of an RGBA picture W pixels wide. */
+export function copyRect(rgba, W, x0, y0, w, h) {
+  const out = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    const s = ((y0 + y) * W + x0) * 4;
+    out.set(rgba.subarray(s, s + w * 4), y * w * 4);
+  }
+  return out;
+}
+
 // ------------------------------------------------------------------ RLE (masks)
 
 export function rleEncode(mask) {
@@ -473,44 +506,63 @@ export function rleDecode(runs, n) {
  */
 export function unpaint(rgba, W, part, paper, tol = 16) {
   const { x0, y0, w, h, mask } = part;
-  const colors = part.colors || [part.color];
   const r32 = new Uint32Array(rgba.buffer, rgba.byteOffset, rgba.length >> 2);
   const patch = new Uint32Array(w * h);
   for (let y = 0; y < h; y++) patch.set(r32.subarray((y0 + y) * W + x0, (y0 + y) * W + x0 + w), y * w);
+  const changed = unpaintPixels(rgba, W, x0, y0, w, h, mask, w, 0, 0, paintModels(part.colors || [part.color], paper), tol);
+  return { patch, changed };
+}
+
+/** Paint colours (drawing pixel values) prepared for unpaintPixels: relative to paper, with the least-squares terms solved. */
+export function paintModels(colors, paper) {
   const pr = Math.max(paper[0], 1), pg = Math.max(paper[1], 1), pb = Math.max(paper[2], 1);
-  // paint colours relative to paper, and the solved least-squares terms for each
   const cand = colors.map((c) => {
     const cr = Math.min(1, c[0] / pr), cg = Math.min(1, c[1] / pg), cb = Math.min(1, c[2] / pb);
     const ur = cr - 1, ug = cg - 1, ub = cb - 1;
     const eu = ur + ug + ub, uu = ur * ur + ug * ug + ub * ub;
     const det = 3 * uu - eu * eu;
     const mx = Math.max(cr, cg, cb), mn = Math.min(cr, cg, cb);
-    return { cr, cg, cb, ur, ug, ub, eu, uu, det, neutral: mx - mn < 0.035 || det < 1e-4 };
+    return { cr, cg, cb, ur, ug, ub, eu, uu, det, neutral: mx - mn < 0.035 || det < 1e-4, lum: 0.3 * cr + 0.59 * cg + 0.11 * cb };
   });
+  return { pr, pg, pb, cand };
+}
+
+/**
+ * The pixel loop of unpaint, over the window (x0, y0, w, h) of rgba (row width W), for the pixels
+ * where mask[(my0 + y) * mw + mx0 + x] is set. models: from paintModels.
+ * loose (highlights that cover paint): a pixel that is close to a paint colour but does not fit the
+ * model, such as JPEG noise or a blurred scan, is read as that paint at its own lightness, so no
+ * specks of the old colour stay behind. It is the largest distance (sum over r, g, b, relative to
+ * paper) at which that applies; 0 = off. Returns the number of pixels changed.
+ */
+export function unpaintPixels(rgba, W, x0, y0, w, h, mask, mw, mx0, my0, models, tol = 16, loose = 0) {
+  const { pr, pg, pb, cand } = models;
+  if (!cand.length) return 0;
   const tol2 = (tol / 255) * (tol / 255);
   let changed = 0;
   for (let y = 0; y < h; y++) {
-    const mrow = y * w;
+    const mrow = (my0 + y) * mw + mx0;
     for (let x = 0; x < w; x++) {
       if (!mask[mrow + x]) continue;
       const p = ((y0 + y) * W + x0 + x) << 2;
       const R = rgba[p], G = rgba[p + 1], B = rgba[p + 2];
       const Pr = R / pr, Pg = G / pg, Pb = B / pb;
       const pmx = Math.max(Pr, Pg, Pb), pmn = Math.min(Pr, Pg, Pb);
-      let bestErr = tol2, bestK = -1;
+      let bestErr = tol2, bestK = -1, bestA = 1;
       for (let i = 0; i < cand.length; i++) {
         const c = cand[i];
         let k;
         if (c.neutral) {
           // grey paint: only grey pixels; the pixel is read as the paint darkened by line work
-          // (k = 1 is the paint itself, which becomes paper)
+          // (k = 1 is the paint itself, which becomes paper). It wins over a coloured paint that
+          // only fits by finding none of its colour in the pixel.
           if (pmx - pmn > 0.05) continue;
           const lum = (Pr + Pg + Pb) / 3;
           if (lum >= 0.985) continue; // already paper
           const lv = (c.cr + c.cg + c.cb) / 3;
           if (lum < lv * 0.35) continue; // ink (walls, lines, text), not paint
           k = Math.min(1, lum / Math.max(lv, 0.05));
-          if (0 < bestErr) { bestErr = 0; bestK = k; }
+          if (0 < bestErr || bestA < 0.05) { bestErr = 0; bestK = k; bestA = 1; }
           continue;
         }
         // least squares for P ~ A*e + Bc*u  (e = 1,1,1 ; u = paint - paper)
@@ -525,7 +577,18 @@ export function unpaint(rgba, W, part, paper, tol = 16) {
         k = (vr * Pr + vg * Pg + vb * Pb) / vv;
         const er = Pr - k * vr, eg = Pg - k * vg, eb = Pb - k * vb;
         const err = er * er + eg * eg + eb * eb;
-        if (err < bestErr) { bestErr = err; bestK = k; }
+        if (err < bestErr) { bestErr = err; bestK = k; bestA = a; }
+      }
+      if (bestK < 0 && loose > 0) {
+        // near a paint colour without fitting it: that paint, at the pixel's own lightness
+        let bd = loose;
+        const lp = 0.3 * Pr + 0.59 * Pg + 0.11 * Pb;
+        for (let i = 0; i < cand.length; i++) {
+          const c = cand[i];
+          if (c.neutral) continue;
+          const d = Math.abs(Pr - c.cr) + Math.abs(Pg - c.cg) + Math.abs(Pb - c.cb);
+          if (d <= bd) { bd = d; bestK = lp / Math.max(c.lum, 0.05); }
+        }
       }
       if (bestK < 0) continue;
       if (bestK > 1) bestK = 1;
@@ -535,7 +598,147 @@ export function unpaint(rgba, W, part, paper, tol = 16) {
       changed++;
     }
   }
-  return { patch, changed };
+  return changed;
+}
+
+// ------------------------------------------------------------------ highlights that cover paint
+
+/** Colours that can be paint (fills), relative to paper (0..255): coloured, or a light grey. */
+function paintish(R, G, B) {
+  const mx = R > G ? (R > B ? R : B) : (G > B ? G : B);
+  const mn = R < G ? (R < B ? R : B) : (G < B ? G : B);
+  if (mx - mn >= 14) return mx >= 60;
+  if (mx - mn < 10) { const v = (R + G + B) / 3; return v >= 140 && v <= 244; }
+  return false;
+}
+
+/**
+ * The paint under a highlight: colour filled into areas of the drawing (a building painted green, a
+ * room painted yellow, water painted blue) that a highlight on top replaces, so the highlight shows
+ * its own colour. Coloured lines, text, hatching and symbols are not fills (nothing solid inside
+ * them), so they stay; so do black and dark grey (walls, line work). A light grey fill counts as paint.
+ *
+ * Looks at the pixels where mask is set in the window (x0, y0, w, h) of rgba (W x H). A colour is a
+ * fill where its pixels have the same colour r pixels away in all four directions (r is about
+ * 0.3 mm, so lines thinner than about 0.7 mm never count) and at least minSolid pixels of it are
+ * like that. Returns the paint colours in drawing pixel values: a few shades per fill, so that noise
+ * in pictures and scans is covered too.
+ */
+const HIST = new Uint32Array(32768);
+const NEAR = new Uint8Array(32768).fill(254); // 254: not worked out yet, 255: no shade near
+
+export function coverPaints(rgba, W, H, x0, y0, w, h, mask, paper, r = 3, minSolid = 200) {
+  const nr = 255 / Math.max(paper[0], 1), ng = 255 / Math.max(paper[1], 1), nb = 255 / Math.max(paper[2], 1);
+  const binOf = (p) => {
+    const R = Math.min(255, rgba[p] * nr), G = Math.min(255, rgba[p + 1] * ng), B = Math.min(255, rgba[p + 2] * nb);
+    return ((R >> 3) << 10) | ((G >> 3) << 5) | (B >> 3);
+  };
+  // 1. the colours under the mask that can be paint, in bins of 8 levels
+  const hist = HIST;
+  const used = [];
+  let total = 0;
+  for (let y = 0; y < h; y++) {
+    const mrow = y * w;
+    let p = ((y0 + y) * W + x0) << 2;
+    for (let x = 0; x < w; x++, p += 4) {
+      if (!mask[mrow + x]) continue;
+      total++;
+      const R = Math.min(255, rgba[p] * nr), G = Math.min(255, rgba[p + 1] * ng), B = Math.min(255, rgba[p + 2] * nb);
+      if (!paintish(R, G, B)) continue;
+      const k = ((R >> 3) << 10) | ((G >> 3) << 5) | (B >> 3);
+      if (hist[k]++ === 0) used.push(k);
+    }
+  }
+  // 2. shades (the heaviest bins, nearby bins joining them), grouped into fills around the heaviest shade of each
+  const bins = used.filter((k) => hist[k] >= 2);
+  bins.sort((a, b) => hist[b] - hist[a]);
+  const counts = bins.map((k) => hist[k]);
+  for (const k of used) hist[k] = 0;
+  if (!total || !bins.length) return [];
+  const shades = [];
+  for (let i = 0; i < bins.length; i++) {
+    const k = bins[i];
+    const R = ((k >> 10) & 31) * 8 + 4, G = ((k >> 5) & 31) * 8 + 4, B = (k & 31) * 8 + 4;
+    let best = -1, bd = 1e9;
+    for (let c = 0; c < shades.length; c++) {
+      const s = shades[c];
+      const d = Math.hypot(s.r - R, s.g - G, s.b - B);
+      if (d < bd) { bd = d; best = c; }
+    }
+    if (best >= 0 && bd <= 22) shades[best].w += counts[i];
+    else if (shades.length < 160) shades.push({ r: R, g: G, b: B, w: counts[i], fam: -1 });
+  }
+  if (!shades.length) return [];
+  const seeds = [];
+  for (let c = 0; c < shades.length; c++) {
+    const s = shades[c];
+    for (const f of seeds) { const q = shades[f]; if (Math.hypot(q.r - s.r, q.g - s.g, q.b - s.b) <= 48) { s.fam = shades[f].fam; break; } }
+    if (s.fam < 0) { s.fam = seeds.length; seeds.push(c); }
+  }
+  const nf = seeds.length;
+  // 3. every pixel of the window and its rim to its nearest shade (within reach), worked out once per colour bin
+  const near = NEAR;
+  const seen = [];
+  const nearest = (k) => {
+    const R = ((k >> 10) & 31) * 8 + 4, G = ((k >> 5) & 31) * 8 + 4, B = (k & 31) * 8 + 4;
+    let best = 255, bd = 58;
+    for (let c = 0; c < shades.length; c++) {
+      const s = shades[c];
+      const d = Math.abs(s.r - R) + Math.abs(s.g - G) + Math.abs(s.b - B);
+      if (d < bd) { bd = d; best = c; }
+    }
+    seen.push(k);
+    return (near[k] = best);
+  };
+  const ex0 = Math.max(0, x0 - r), ey0 = Math.max(0, y0 - r), ex1 = Math.min(W, x0 + w + r), ey1 = Math.min(H, y0 + h + r);
+  const ew = ex1 - ex0, eh = ey1 - ey0;
+  const fam = new Uint8Array(ew * eh).fill(255);
+  const shadeAt = new Uint8Array(ew * eh).fill(255);
+  for (let y = 0; y < eh; y++) {
+    let p = ((ey0 + y) * W + ex0) << 2;
+    for (let x = 0; x < ew; x++, p += 4) {
+      const k = binOf(p);
+      let c = near[k];
+      if (c === 254) c = nearest(k);
+      if (c !== 255) { shadeAt[y * ew + x] = c; fam[y * ew + x] = shades[c].fam; }
+    }
+  }
+  for (const k of seen) near[k] = 254;
+  // 4. how much of each fill is solid
+  const cnt = new Float64Array(nf), solid = new Float64Array(nf);
+  const sw = new Float64Array(shades.length), sr = new Float64Array(shades.length), sg = new Float64Array(shades.length), sb = new Float64Array(shades.length);
+  for (let y = 0; y < h; y++) {
+    const gy = y0 + y, ly = gy - ey0;
+    for (let x = 0; x < w; x++) {
+      if (!mask[y * w + x]) continue;
+      const gx = x0 + x, lx = gx - ex0;
+      const i = ly * ew + lx;
+      const f = fam[i];
+      if (f === 255) continue;
+      cnt[f]++;
+      if (lx - r < 0 || lx + r >= ew || ly - r < 0 || ly + r >= eh) continue;
+      if (fam[i - r] !== f || fam[i + r] !== f || fam[i - r * ew] !== f || fam[i + r * ew] !== f) continue;
+      solid[f]++;
+      const c = shadeAt[i], p = (gy * W + gx) << 2;
+      sw[c]++; sr[c] += rgba[p]; sg[c] += rgba[p + 1]; sb[c] += rgba[p + 2];
+    }
+  }
+  // 5. the fills: their shades, as the mean colour of the solid pixels of each
+  const keep = [];
+  for (let f = 0; f < nf; f++) {
+    if (solid[f] < Math.min(minSolid, total * 0.25) || solid[f] < 0.12 * cnt[f]) continue;
+    keep.push(f);
+  }
+  keep.sort((a, b) => solid[b] - solid[a]);
+  const out = [];
+  for (const f of keep) {
+    const own = [];
+    for (let c = 0; c < shades.length; c++) if (shades[c].fam === f && sw[c] >= Math.max(3, solid[f] * 0.01)) own.push(c);
+    own.sort((a, b) => sw[b] - sw[a]);
+    for (const c of own.slice(0, 3)) out.push([sr[c] / sw[c], sg[c] / sw[c], sb[c] / sw[c]]);
+    if (out.length >= 24) break;
+  }
+  return out;
 }
 
 export function restorePatch(rgba, W, part, patch) {

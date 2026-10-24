@@ -486,6 +486,7 @@ export function chooseSaveType(defaultType, keepWork = false) {
 export function showHelp() {
   const rows = [
     ['Tools', [['S', 'Select and move'], ['F', 'Fill an enclosed area'], ['P', 'Polygon'], ['R', 'Rectangle'], ['G', 'Gap line (stops Fill at openings)'], ['K', 'Dimension'], ['C', 'Calibrate the scale'], ['X', 'Snag pin'], ['I', 'Pick a colour'], ['E', 'Eraser (highlights and drawing colour)'], ['M', 'Magnifier'], ['L', 'Legend on sheet'], ['D', 'Find painted colour']]],
+    ['Fill (F)', [['Click', 'Fill an enclosed area'], ['Click a fill', 'Give it the current colour'], ['Shift+click', 'Add the area to the highlight next to it (a building split by its number)'], ['Alt+click', 'Pick a colour from the sheet']]],
     ['Progress map and snag pins', [['1 2 3 0', 'Selected zones: Not started, In progress, Done, Not counted (progress map on)'], ['1 2 3', 'Selected pins: Open, Fixed, Closed'], ['X, click', 'Drop a snag pin, then type its note'], ['Double-click a pin', 'Edit its note'], ['Ctrl+V', 'Paste a photo into the selected pin'], ['Drag a pin', 'Move it']]],
     ['Dimension (K) and Calibrate (C)', [['Click, click', 'The two points to measure between'], ['Click again', 'Where the dimension line goes (Enter: on the points)'], ['Shift', 'Horizontal or vertical'], ['Ctrl', 'Hold to stop snapping'], ['Backspace', 'Back one step'], ['Drag an end', 'Move a point of a selected dimension'], ['Drag the dot', 'Move the dimension line'], ['Calibrate', 'Click both ends of a known length, then type it']]],
     ['While drawing a polygon', [['H', 'Next edge horizontal'], ['V', 'Next edge vertical'], ['A', '90° to the last edge (press again for an earlier edge)'], ['Alt+click', 'Use an edge of another markup for 90°'], ['Shift', 'Horizontal or vertical, whichever is closer'], ['F8', 'Keep horizontal / vertical on'], ['Ctrl', 'Hold to stop snapping'], ['Enter', 'Close the polygon'], ['Backspace', 'Remove the last corner'], ['Esc', 'Cancel']]],
@@ -499,6 +500,6 @@ export function showHelp() {
     h('div', { class: 'help-grid' }, ...rows.map(([t, items]) => h('section', null,
       h('h3', null, t),
       h('dl', null, ...items.flatMap(([k, v]) => [h('dt', null, h('kbd', null, k)), h('dd', null, v)]))))),
-    h('p', { class: 'about' }, 'PlanTint 1.5.0. Built with Electron, MuPDF (AGPL), Clipper, UTIF, fflate, IBM Plex fonts (OFL) and Lucide icons (ISC). The full source is included with this copy.'));
+    h('p', { class: 'about' }, 'PlanTint 1.5.1. Built with Electron, MuPDF (AGPL), Clipper, UTIF, fflate, IBM Plex fonts (OFL) and Lucide icons (ISC). The full source is included with this copy.'));
   return modal({ title: 'Keys and mouse', body, wide: true, buttons: [{ label: 'Close', value: true, primary: true }] });
 }

@@ -181,6 +181,7 @@ kbd { font: 11.5px var(--font); }
 .field .val { text-align: right; font-variant-numeric: tabular-nums; }
 .field-sub { grid-template-columns: 1fr auto; height: 30px; }
 .field-line { grid-template-columns: 58px 1fr; height: 32px; }
+.field-cover { grid-template-columns: 1fr; height: 28px; }
 .sub-label { color: var(--ink-2); }
 input[type=range] { accent-color: var(--blue); width: 100%; margin: 0; }
 
@@ -523,7 +524,7 @@ input[type=range] { accent-color: var(--blue); width: 100%; margin: 0; }
   .palette { margin: 8px 0 6px; gap: 5px; }
   .sw { height: 22px; }
   .style-card { padding: 10px 14px; }
-  .field, .field-sub { height: 26px; }
+  .field, .field-sub, .field-cover { height: 26px; }
   .field-line { height: 30px; }
   .pin-card { padding: 10px 14px; gap: 7px; }
   .pc-note { min-height: 46px; }

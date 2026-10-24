@@ -63,7 +63,7 @@ export const S = {
   selection: new Set(), // markup, dimension and pin ids
   legendSelected: false,
   tool: 'select',
-  style: { color: '#FFD60A', opacity: 0.45, borderPt: 0, borderColor: null, borderStyle: 'solid' },
+  style: { color: '#FFD60A', opacity: 0.45, borderPt: 0, borderColor: null, borderStyle: 'solid', cover: true },
   fill: { tol: 25, gaps: 1, cover: true, autoName: true },
   eraser: { size: 30, mode: 'both' }, // mode: both | highlights | drawing
   lock: { mode: 'free', once: null, refIdx: -1, extRef: null },
@@ -104,6 +104,8 @@ export function makeMarkup({ kind, rings, name, style }) {
     borderPt: st.borderPt || 0,
     borderColor: st.borderColor || null,
     borderStyle: st.borderStyle || 'solid',
+    // covers the paint under it (see covers.js); only the exception is stored
+    ...(st.cover === false ? { cover: false } : {}),
   });
 }
 

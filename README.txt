@@ -1,18 +1,38 @@
-PlanTint 1.5.0
+PlanTint 1.5.1
 Highlighting and measuring for architectural and technical drawings.
 
 INSTALL
-  PlanTint-Setup-1.5.0.exe
+  PlanTint-Setup-1.5.1.exe
       Installs for your Windows user only (no admin rights needed), adds Start menu and
       desktop shortcuts, and opens .plantint project files when you double-click them.
       Recommended. Installing over an earlier version keeps your settings.
 
-  PlanTint-1.5.0-portable.exe
+  PlanTint-1.5.1-portable.exe
       One file, nothing installed. It unpacks itself each time, so it starts a few
       seconds slower than the installed version.
 
   The program is not code-signed, so Windows may show "Windows protected your PC".
   Click "More info", then "Run anyway".
+
+WHAT'S NEW IN 1.5.1: HIGHLIGHTS ON LAYOUTS THAT ARE ALREADY COLOURED
+  A highlight now shows its own colour on a drawing that already has colour in it, such
+  as a layout whose buildings are filled green, orange or yellow, or a plan with painted
+  rooms. Before, the new colour mixed with the old one (red on green came out olive).
+  - Under each highlight the colour already painted on the drawing is taken out, and the
+    highlight's colour goes on clean paper. Lines, text and building numbers stay.
+  - Only filled areas count as paint. Coloured lines, text, revision clouds, hatching and
+    symbols stay as they are, so do black and dark grey (walls, line work).
+  - Nothing in the drawing itself changes: move, recolour or delete the highlight and the
+    old colour is back. It works on screen, when zoomed in, and in PNG, JPEG and PDF.
+    In a PDF the drawing stays vector; only the painted pixels under highlights are
+    replaced by pictures.
+  - "Cover colour already on the drawing", at the bottom of the style card, is on for
+    every highlight. Untick it for a highlight that should tint the colour under it like
+    a highlighter pen instead. It is saved with the project.
+  - Fill: Shift+click adds the area to the highlight next to it. On a low-resolution
+    picture of a layout, a building number written right across a building can stop Fill
+    at the number, so only one side fills: Shift+click the other side and the building is
+    one highlight, number included.
 
 WHAT'S NEW IN 1.5: PROGRESS MAP AND SNAG PINS
   1. Progress map.
@@ -216,7 +236,8 @@ FIRST STEPS
   Press F1 inside PlanTint to see every key.
 
 GOOD TO KNOW
-  - Highlights tint the paper like a marker, so lines and text stay readable.
+  - Highlights tint the paper like a marker, so lines and text stay readable. On a
+    drawing that is already coloured they replace that colour (see 1.5.1).
   - Existing markups act as walls for Fill. Gap lines (G) close door openings;
     they are never printed.
   - If a fill would spill over most of the sheet, PlanTint asks before filling.
@@ -228,4 +249,4 @@ LICENCES
   PlanTint uses Electron (MIT), MuPDF (AGPL-3.0), Clipper (Boost), UTIF (MIT),
   fflate (MIT), IBM Plex fonts (SIL OFL) and Lucide icons (ISC).
   Because MuPDF is AGPL, the complete source of this program is included in
-  PlanTint-1.5.0-source.zip.
+  PlanTint-1.5.1-source.zip.

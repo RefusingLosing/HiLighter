@@ -4,3 +4,4 @@ release/
 testdata/out
 test/harness/.work/
 *.log
+__pycache__/

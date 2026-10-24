@@ -18,6 +18,7 @@ import { scheduleXlsx, scheduleCsv } from './schedule.js';
 import { shown, readProg } from './progress.js';
 import { pinExport, readPin } from './pins.js';
 import { progressXlsx, snagXlsx } from './reports.js';
+import { syncCovers } from './covers.js';
 
 const IMG_EXT = ['png', 'jpg', 'jpeg', 'tif', 'tiff', 'bmp', 'gif', 'webp'];
 const MAX_IMAGE_PX = 100e6;
@@ -226,6 +227,7 @@ async function buildProject() {
     markups: S.markups.map((m) => ({
       id: m.id, name: m.name, kind: m.kind, color: m.color, opacity: m.opacity,
       borderPt: m.borderPt, borderColor: m.borderColor, borderStyle: m.borderStyle || 'solid',
+      ...(m.cover === false ? { cover: false } : {}),
       rings: m.rings.map((r) => r.map(round2)),
       ...(m.tagAt ? { tagAt: m.tagAt.map(round2) } : {}),
       ...(m.prog ? { prog: { ...m.prog } } : {}),
@@ -286,6 +288,7 @@ async function openProject(bytes, path, name, restored = false) {
     S.markups = (meta.markups || []).map((m) => Object.freeze({
       id: m.id, name: m.name, kind: m.kind || 'fill', color: m.color, opacity: m.opacity,
       borderPt: m.borderPt || 0, borderColor: m.borderColor || null, borderStyle: isLineStyle(m.borderStyle) ? m.borderStyle : 'solid',
+      ...(m.cover === false ? { cover: false } : {}),
       rings: fixRings(m.rings),
       ...(Array.isArray(m.tagAt) && m.tagAt.length === 2 ? { tagAt: fixPt(m.tagAt) } : {}),
       ...(readProg(m.prog) ? { prog: readProg(m.prog) } : {}),
@@ -357,6 +360,7 @@ function exportMarkups() {
 }
 
 async function exportImage(type) {
+  await syncCovers(); // the engine takes paint out under covering highlights: make sure it has them all
   const legend = await legendPng(1);
   const annots = await annotExport(1);
   annots.over = await pinExport(1);
@@ -364,6 +368,7 @@ async function exportImage(type) {
 }
 
 async function exportPdf(flat) {
+  await syncCovers();
   const ms = exportMarkups();
   if (!flat) {
     // highlights never stack: each one is hidden where the ones above it (and their borders) are

@@ -29,6 +29,8 @@ const E = {
   ops: new Map(),
   found: new Map(),
   walls: new Map(), wallMask: null, wallKey: '',
+  covers: new Map(),  // highlights that cover the paint under them, by markup id (see setCovers)
+  viewVer: 0,         // version of what the tiles show (the drawing, or the covers on it)
   paper: [255, 255, 255],
   ink: null,
   vec: null,          // the PDF page's line geometry in sheet pixels, for exact snapping (built on first use)
@@ -51,6 +53,7 @@ function freeRaster() {
   E.raster = null; E.levels = []; E.dt = null; E.dtKey = ''; E.scratch = null; E.gapMask = null;
   E.ops.clear(); E.found.clear();
   E.walls.clear(); E.wallMask = null; E.wallKey = '';
+  E.covers.clear();
   E.ink = null;
   E.vec = null;
 }
@@ -241,13 +244,31 @@ function updateLevels(x0, y0, x1, y1) {
     const src = E.levels[l - 1], dst = E.levels[l];
     rx0 = Math.floor(rx0 / 2); ry0 = Math.floor(ry0 / 2);
     rx1 = Math.min(dst.w, Math.ceil(rx1 / 2)); ry1 = Math.min(dst.h, Math.ceil(ry1 / 2));
-    IP.reduce2x(src.data, src.w, src.h, dst.data, dst.w, rx0, ry0, rx1, ry1);
+    if (l === 1) reduceLevel1(rx0, ry0, rx1, ry1);
+    else IP.reduce2x(src.data, src.w, src.h, dst.data, dst.w, rx0, ry0, rx1, ry1);
+  }
+}
+
+/** Level 1 from the drawing as it shows (paint taken out under covering highlights), in bands. */
+function reduceLevel1(rx0, ry0, rx1, ry1) {
+  const L0 = E.levels[0], L1 = E.levels[1];
+  if (rx1 <= rx0 || ry1 <= ry0) return;
+  const band = Math.max(8, Math.floor(2e6 / ((rx1 - rx0) * 4)));
+  for (let y = ry0; y < ry1; y += band) {
+    const yb = Math.min(ry1, y + band);
+    const sx0 = 2 * rx0, sy0 = 2 * y, sx1 = Math.min(L0.w, 2 * rx1), sy1 = Math.min(L0.h, 2 * yb);
+    const list = coversIn(sx0, sy0, sx1, sy1);
+    if (!list.length) { IP.reduce2x(L0.data, L0.w, L0.h, L1.data, L1.w, rx0, y, rx1, yb); continue; }
+    const w = sx1 - sx0, h = sy1 - sy0;
+    const buf = IP.copyRect(E.raster, E.W, sx0, sy0, w, h);
+    applyCovers(buf, sx0, sy0, w, h, list);
+    IP.reduce2xFrom(buf, w, sx0, sy0, L0.w, L0.h, L1.data, L1.w, rx0, y, rx1, yb);
   }
 }
 
 async function tileBitmap(L, tx, ty) {
   const T = E.TILE;
-  const ver = E.rasterVer;
+  const ver = E.viewVer;
   const x0 = tx * T, y0 = ty * T;
   const w = Math.min(T, L.w - x0), h = Math.min(T, L.h - y0);
   const buf = new Uint8ClampedArray(w * h * 4);
@@ -255,36 +276,124 @@ async function tileBitmap(L, tx, ty) {
     const s = ((y0 + y) * L.w + x0) * 4;
     buf.set(L.data.subarray(s, s + w * 4), y * w * 4);
   }
+  if (L === E.levels[0]) applyCovers(buf, x0, y0, w, h);
   const bmp = await createImageBitmap(new ImageData(buf, w, h));
   return { tx, ty, x: x0, y: y0, w, h, ver, bitmap: bmp };
 }
 
-/** Sends tiles of every level that intersect rect (level-0 pixels); rect null = everything. */
-async function sendTiles(gen, rect) {
+/** Sends the tiles of every level that intersect any of rects (level-0 pixels); rects null = everything. */
+async function sendTiles(gen, rects) {
   const T = E.TILE;
   for (let l = E.levels.length - 1; l >= 0; l--) {
     const L = E.levels[l];
     const f = 1 << l;
     const cols = Math.ceil(L.w / T), rows = Math.ceil(L.h / T);
-    let c0 = 0, c1 = cols - 1, r0 = 0, r1 = rows - 1;
-    if (rect) {
-      c0 = Math.max(0, Math.floor(rect[0] / f / T)); c1 = Math.min(cols - 1, Math.floor((rect[2] - 1) / f / T));
-      r0 = Math.max(0, Math.floor(rect[1] / f / T)); r1 = Math.min(rows - 1, Math.floor((rect[3] - 1) / f / T));
+    const keys = new Set();
+    for (const rect of rects || [[0, 0, L.w * f, L.h * f]]) {
+      const c0 = Math.max(0, Math.floor(rect[0] / f / T)), c1 = Math.min(cols - 1, Math.floor((rect[2] - 1) / f / T));
+      const r0 = Math.max(0, Math.floor(rect[1] / f / T)), r1 = Math.min(rows - 1, Math.floor((rect[3] - 1) / f / T));
+      for (let ty = r0; ty <= r1; ty++) for (let tx = c0; tx <= c1; tx++) keys.add(ty * cols + tx);
     }
     let batch = [];
-    for (let ty = r0; ty <= r1; ty++) {
-      for (let tx = c0; tx <= c1; tx++) {
-        if (gen !== E.gen) return;
-        batch.push(await tileBitmap(L, tx, ty));
-        if (batch.length >= 6) {
-          post({ type: 'tiles', gen, level: l, levelW: L.w, levelH: L.h, tiles: batch }, batch.map((t) => t.bitmap));
-          batch = [];
-        }
+    for (const k of [...keys].sort((a, b) => a - b)) {
+      if (gen !== E.gen) return;
+      batch.push(await tileBitmap(L, k % cols, Math.floor(k / cols)));
+      if (batch.length >= 6) {
+        post({ type: 'tiles', gen, level: l, levelW: L.w, levelH: L.h, tiles: batch }, batch.map((t) => t.bitmap));
+        batch = [];
       }
     }
     if (batch.length) post({ type: 'tiles', gen, level: l, levelW: L.w, levelH: L.h, tiles: batch }, batch.map((t) => t.bitmap));
   }
   post({ type: 'tiles-done', gen });
+}
+
+// ------------------------------------------------------------------ highlights that cover paint
+
+// A highlight shows its own colour, not a mix with colour already painted on the drawing (a layout
+// whose buildings are filled green, a plan with coloured rooms): under each highlight the paint is
+// taken out wherever the drawing is shown or exported, while line work and text stay. The drawing's
+// own pixels never change, so moving, recolouring or deleting a highlight brings the paint back.
+const COVER_TOL = 24, COVER_LOOSE = 0.22;
+const coverReach = () => Math.max(2, Math.round((E.dpi * 0.3) / 25.4));
+const coverMinSolid = () => Math.round(((E.dpi * 1.5) / 25.4) ** 2);
+
+function buildCover(id, key, rings) {
+  const { W, H } = E;
+  let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+  for (const r of rings) for (let i = 0; i < r.length; i += 2) {
+    if (r[i] < bx0) bx0 = r[i]; if (r[i] > bx1) bx1 = r[i];
+    if (r[i + 1] < by0) by0 = r[i + 1]; if (r[i + 1] > by1) by1 = r[i + 1];
+  }
+  const x0 = Math.max(0, Math.floor(bx0)), y0 = Math.max(0, Math.floor(by0));
+  const x1 = Math.min(W, Math.ceil(bx1)), y1 = Math.min(H, Math.ceil(by1));
+  const c = { id, key, rings, x0, y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0), mask: null, paints: [], models: null };
+  if (!c.w || !c.h) return c;
+  const mask = new Uint8Array(c.w * c.h);
+  IP.rasterizeRings(rings, x0, y0, c.w, c.h, mask);
+  const paints = IP.coverPaints(E.raster, W, H, x0, y0, c.w, c.h, mask, E.paper, coverReach(), coverMinSolid());
+  if (paints.length) { c.mask = mask; c.paints = paints; c.models = IP.paintModels(paints, E.paper); }
+  return c;
+}
+
+const coverBox = (c) => [c.x0, c.y0, c.x0 + c.w, c.y0 + c.h];
+
+/** Covers with paint to take out that reach into [x0, x1) x [y0, y1). */
+function coversIn(x0, y0, x1, y1) {
+  const out = [];
+  for (const c of E.covers.values()) if (c.models && c.x0 < x1 && c.x0 + c.w > x0 && c.y0 < y1 && c.y0 + c.h > y0) out.push(c);
+  return out;
+}
+
+/** Takes the paint out under covering highlights in buf, which holds columns [bx0, bx0 + bw) and rows [by0, by0 + bh) of the drawing. */
+function applyCovers(buf, bx0, by0, bw, bh, list = coversIn(bx0, by0, bx0 + bw, by0 + bh)) {
+  for (const c of list) {
+    const ix0 = Math.max(bx0, c.x0), iy0 = Math.max(by0, c.y0);
+    const ix1 = Math.min(bx0 + bw, c.x0 + c.w), iy1 = Math.min(by0 + bh, c.y0 + c.h);
+    if (ix1 <= ix0 || iy1 <= iy0) continue;
+    IP.unpaintPixels(buf, bw, ix0 - bx0, iy0 - by0, ix1 - ix0, iy1 - iy0, c.mask, c.w, ix0 - c.x0, iy0 - c.y0, c.models, COVER_TOL, COVER_LOOSE);
+  }
+}
+
+/** Shows the drawing again where it changed (rects in level-0 pixels): the levels, then the tiles. */
+function refreshView(rects) {
+  const rs = [];
+  for (const b of rects) {
+    const x0 = Math.max(0, Math.floor(b[0])), y0 = Math.max(0, Math.floor(b[1]));
+    const x1 = Math.min(E.W, Math.ceil(b[2])), y1 = Math.min(E.H, Math.ceil(b[3]));
+    if (x1 > x0 && y1 > y0) rs.push([x0, y0, x1, y1]);
+  }
+  if (!rs.length) return;
+  E.viewVer++;
+  for (const r of rs) updateLevels(r[0], r[1], r[2], r[3]);
+  sendTiles(E.gen, rs);
+}
+
+/**
+ * The highlights that cover paint: [{ id, key, rings }], all of them. key changes whenever the
+ * shape does; rings may be left out for a key sent before. Returns { need: ids } for the ones whose
+ * shape is needed (not seen before, or the drawing was opened again).
+ */
+function setCovers({ list }) {
+  if (!E.raster) return { need: [] };
+  const seen = new Set(), dirty = [], need = [];
+  for (const it of list) {
+    seen.add(it.id);
+    const old = E.covers.get(it.id);
+    if (old && old.key === it.key) continue;
+    if (!it.rings) { need.push(it.id); continue; }
+    const c = buildCover(it.id, it.key, it.rings);
+    if (old && old.models) dirty.push(coverBox(old));
+    if (c.models) dirty.push(coverBox(c));
+    E.covers.set(it.id, c);
+  }
+  for (const [id, c] of E.covers) {
+    if (seen.has(id)) continue;
+    if (c.models) dirty.push(coverBox(c));
+    E.covers.delete(id);
+  }
+  refreshView(dirty);
+  return { need, covers: [...E.covers.values()].filter((c) => c.models).length };
 }
 
 /** Coarse map of how much line work each part of the sheet has (for placing the legend). */
@@ -312,6 +421,7 @@ function finishRaster(gen) {
   E.ink = inkGrid();
   buildLevels();
   E.rasterVer++;
+  E.viewVer++;
   E.dt = null; E.dtKey = '';
   E.ops.clear(); E.found.clear();
   E.gapMask = null;
@@ -321,10 +431,15 @@ function finishRaster(gen) {
 function afterRasterChange(b) {
   E.rasterVer++;
   E.dtKey = '';
-  const x0 = Math.max(0, b[0]), y0 = Math.max(0, b[1]), x1 = Math.min(E.W, b[2]), y1 = Math.min(E.H, b[3]);
-  if (x1 <= x0 || y1 <= y0) return;
-  updateLevels(x0, y0, x1, y1);
-  sendTiles(E.gen, [x0, y0, x1, y1]);
+  // the paint under covering highlights there may have changed (colour taken out, or put back by undo)
+  const rects = [b];
+  for (const c of [...E.covers.values()]) {
+    if (!(c.x0 < b[2] && c.x0 + c.w > b[0] && c.y0 < b[3] && c.y0 + c.h > b[1])) continue;
+    const n = buildCover(c.id, c.key, c.rings);
+    E.covers.set(c.id, n);
+    if (c.models || n.models) rects.push(coverBox(c));
+  }
+  refreshView(rects);
 }
 
 function rgbToRgba(px, stride, n, w, h, dst, dstOffsetRow, dstW) {
@@ -351,6 +466,8 @@ async function pixmapToBitmap(pix) {
 }
 
 const H_ = {};
+
+H_.setCovers = setCovers;
 
 H_.openPdf = async ({ bytes }) => {
   const mupdf = await MU();
@@ -462,8 +579,21 @@ H_.renderRegion = async ({ x0, y0, x1, y1, k, gen }) => {
   const dev = new mupdf.DrawDevice(mupdf.Matrix.scale(E.pageScale * k, E.pageScale * k), pix);
   E.dl.run(dev, mupdf.Matrix.identity);
   dev.close(); dev.destroy();
-  const bmp = await pixmapToBitmap(pix);
+  const buf = new Uint8ClampedArray(w * h * 4);
+  rgbToRgba(pix.getPixels(), pix.getStride(), pix.getNumberOfComponents(), w, h, buf, 0, w);
   pix.destroy();
+  // highlights that cover paint: take it out here too, at this resolution
+  for (const c of coversIn(x0, y0, x1, y1)) {
+    const sx = (v) => (v + E.ib[0]) * k - bx0, sy = (v) => (v + E.ib[1]) * k - by0;
+    const cx0 = Math.max(0, Math.floor(sx(c.x0))), cy0 = Math.max(0, Math.floor(sy(c.y0)));
+    const cx1 = Math.min(w, Math.ceil(sx(c.x0 + c.w))), cy1 = Math.min(h, Math.ceil(sy(c.y0 + c.h)));
+    if (cx1 <= cx0 || cy1 <= cy0) continue;
+    const mw = cx1 - cx0, mh = cy1 - cy0;
+    const m = new Uint8Array(mw * mh);
+    IP.rasterizeRings(c.rings.map((r) => r.map((v, i) => (i & 1 ? sy(v) : sx(v)))), cx0, cy0, mw, mh, m);
+    IP.unpaintPixels(buf, w, cx0, cy0, mw, mh, m, mw, 0, 0, c.models, COVER_TOL, COVER_LOOSE);
+  }
+  const bmp = await createImageBitmap(new ImageData(buf, w, h));
   if (gen !== E.gen) { bmp.close(); return null; }
   return { result: { bitmap: bmp, rect: [bx0 / k - E.ib[0], by0 / k - E.ib[1], bx1 / k - E.ib[0], by1 / k - E.ib[1]], k, ver: E.rasterVer }, transfer: [bmp] };
 };
@@ -688,7 +818,56 @@ H_.setGaps = ({ lines }) => {
   return true;
 };
 
-H_.flood = ({ x, y, tol, gapPx, cover, holeRatio, tuck, walls, force, leakShare = 0.4 }) => {
+/**
+ * Joins a new fill (mask m, window x0, y0, w, h) to the highlight next to it: the one with the most
+ * pixels within reach (about 1.2 mm, the thickness of writing). The gap between them, the writing
+ * that split the area, is taken in: dark ink and free space within reach of both. Returns the whole
+ * joined shape as a mask in its own window, or null when no highlight is near.
+ */
+function joinNearest(m, x0, y0, w, h, dt) {
+  const { W, H } = E;
+  const d = Math.max(2, Math.round((1.2 / 25.4) * E.dpi));
+  const ex0 = Math.max(0, x0 - d), ey0 = Math.max(0, y0 - d), ex1 = Math.min(W, x0 + w + d), ey1 = Math.min(H, y0 + h + d);
+  const ew = ex1 - ex0, eh = ey1 - ey0;
+  const mE = new Uint8Array(ew * eh);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (m[y * w + x]) mE[(y + y0 - ey0) * ew + x + x0 - ex0] = 1;
+  const reach = IP.dilate(mE, ew, eh, d);
+  let best = null, bestN = 0;
+  for (const [id, c] of E.walls) {
+    if (!c.mask) continue;
+    const ix0 = Math.max(ex0, c.x0), iy0 = Math.max(ey0, c.y0), ix1 = Math.min(ex1, c.x0 + c.w), iy1 = Math.min(ey1, c.y0 + c.h);
+    let n = 0;
+    for (let y = iy0; y < iy1; y++) for (let x = ix0; x < ix1; x++) if (c.mask[(y - c.y0) * c.w + x - c.x0] && reach[(y - ey0) * ew + x - ex0]) n++;
+    if (n > bestN) { bestN = n; best = id; }
+  }
+  if (!best) return null;
+  const c = E.walls.get(best);
+  const ux0 = Math.max(0, Math.min(ex0, c.x0 - d)), uy0 = Math.max(0, Math.min(ey0, c.y0 - d));
+  const ux1 = Math.min(W, Math.max(ex1, c.x0 + c.w + d)), uy1 = Math.min(H, Math.max(ey1, c.y0 + c.h + d));
+  const uw = ux1 - ux0, uh = uy1 - uy0;
+  if (uw * uh > 30e6) return null;
+  const a = new Uint8Array(uw * uh), b = new Uint8Array(uw * uh);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (m[y * w + x]) a[(y + y0 - uy0) * uw + x + x0 - ux0] = 1;
+  for (let y = 0; y < c.h; y++) for (let x = 0; x < c.w; x++) if (c.mask[y * c.w + x]) b[(y + c.y0 - uy0) * uw + x + c.x0 - ux0] = 1;
+  const ra = IP.dilate(a, uw, uh, d), rb = IP.dilate(b, uw, uh, d);
+  const pl = 0.3 * E.paper[0] + 0.59 * E.paper[1] + 0.11 * E.paper[2];
+  const out = new Uint8Array(uw * uh);
+  for (let y = 0; y < uh; y++) {
+    for (let x = 0; x < uw; x++) {
+      const i = y * uw + x;
+      if (a[i] || b[i]) { out[i] = 1; continue; }
+      if (!ra[i] || !rb[i]) continue;
+      const j = (uy0 + y) * W + ux0 + x, p = j << 2;
+      const ink = 0.3 * E.raster[p] + 0.59 * E.raster[p + 1] + 0.11 * E.raster[p + 2] < pl * 0.5;
+      if (ink || dt[j] >= 1) out[i] = 1;
+    }
+  }
+  const area = IP.countMask(out);
+  IP.fillHoles(out, uw, uh, (n) => n <= area * 0.35);
+  return { id: best, mask: out, x0: ux0, y0: uy0, w: uw, h: uh };
+}
+
+H_.flood = ({ x, y, tol, gapPx, cover, holeRatio, tuck, walls, force, join = false, leakShare = 0.4 }) => {
   const { W, H } = E;
   const ix = Math.floor(x), iy = Math.floor(y);
   if (ix < 0 || iy < 0 || ix >= W || iy >= H) return { error: 'outside' };
@@ -718,9 +897,9 @@ H_.flood = ({ x, y, tol, gapPx, cover, holeRatio, tuck, walls, force, leakShare 
     return { leak: true, share: st.area / (W * H) };
   }
   const pad = thr + tuck + 3;
-  const wx0 = Math.max(0, st.x0 - pad), wy0 = Math.max(0, st.y0 - pad);
-  const wx1 = Math.min(W - 1, st.x1 + pad), wy1 = Math.min(H - 1, st.y1 + pad);
-  const w = wx1 - wx0 + 1, h = wy1 - wy0 + 1;
+  let wx0 = Math.max(0, st.x0 - pad), wy0 = Math.max(0, st.y0 - pad);
+  let wx1 = Math.min(W - 1, st.x1 + pad), wy1 = Math.min(H - 1, st.y1 + pad);
+  let w = wx1 - wx0 + 1, h = wy1 - wy0 + 1;
   let m = IP.cropMask(R, W, wx0, wy0, w, h);
   IP.clearRect(R, W, st.x0, st.y0, st.x1 - st.x0 + 1, st.y1 - st.y0 + 1);
   if (thr > 0) {
@@ -746,8 +925,14 @@ H_.flood = ({ x, y, tol, gapPx, cover, holeRatio, tuck, walls, force, leakShare 
   const maxHole = cover ? baseArea * holeRatio : Math.max(6, (2 * tuck + 2) ** 2);
   IP.fillHoles(m, w, h, (area) => area <= maxHole);
   if (tuck > 0) m = IP.dilate(m, w, h, tuck);
+  // Shift+click: one highlight with the one next to it (a building split by the number written across it)
+  let joinId = null;
+  if (join) {
+    const jn = joinNearest(m, wx0, wy0, w, h, dt);
+    if (jn) { joinId = jn.id; m = jn.mask; wx0 = jn.x0; wy0 = jn.y0; w = jn.w; h = jn.h; wx1 = wx0 + w - 1; wy1 = wy0 + h - 1; }
+  }
   const rings = IP.maskToRings(m, w, h, wx0, wy0, 0.9, 4);
-  return { rings, area: IP.countMask(m), bbox: [wx0, wy0, wx1 + 1, wy1 + 1], gapUsed: thr, seed: [r, g, b], sheetArea: W * H };
+  return { rings, area: IP.countMask(m), bbox: [wx0, wy0, wx1 + 1, wy1 + 1], gapUsed: thr, seed: [r, g, b], sheetArea: W * H, joinId };
 };
 
 // ------------------------------------------------------------------ painted colour
@@ -963,7 +1148,9 @@ function composeBand(ctx, y0, bh, markups, legend, overlay, annots = null) {
   const { W } = E;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalCompositeOperation = 'source-over';
-  ctx.putImageData(new ImageData(E.raster.slice(y0 * W * 4, (y0 + bh) * W * 4), W, bh), 0, 0);
+  const base = E.raster.slice(y0 * W * 4, (y0 + bh) * W * 4);
+  applyCovers(base, 0, y0, W, bh);
+  ctx.putImageData(new ImageData(base, W, bh), 0, 0);
   if (markups.length) {
     const o = overlay.getContext('2d');
     o.setTransform(1, 0, 0, 1, 0, 0);
@@ -1222,7 +1409,15 @@ H_.exportPdf = async ({ mode, markups, legend, annots, title }, id) => {
       if (lgb) lgb.bitmap.close();
       closeAnnots(anb);
     } else {
-      rgb = rgbBytes(E.raster, W, 0, 0, W, H);
+      // the picture, with the paint taken out under covering highlights
+      rgb = new Uint8Array(W * H * 3);
+      const BH = Math.max(16, Math.floor(8e6 / W));
+      for (let y0 = 0; y0 < H; y0 += BH) {
+        const bh = Math.min(BH, H - y0);
+        const band = E.raster.slice(y0 * W * 4, (y0 + bh) * W * 4);
+        applyCovers(band, 0, y0, W, bh);
+        rgb.set(rgbBytes(band, W, 0, 0, W, bh), y0 * W * 3);
+      }
     }
     prog(0.62, 'Compressing the picture');
     if (E.srcExt === 'jpg' || E.srcExt === 'jpeg') {
@@ -1256,6 +1451,25 @@ H_.exportPdf = async ({ mode, markups, legend, annots, title }, id) => {
         xobj.put(name, addPlainImage(out, rgbBytes(E.raster, W, part.x0, part.y0, part.w, part.h), part.w, part.h, alpha)); nX++;
         ops.push(`q ${pn(part.w)} 0 0 ${pn(-part.h)} ${pn(part.x0)} ${pn(part.y0 + part.h)} cm /${name} Do Q`);
       }
+    }
+  }
+  // paint taken out under covering highlights: pictures of only the pixels that change, so the
+  // drawing's own lines and text stay vector
+  if (src && mode !== 'flat') {
+    for (const c of E.covers.values()) {
+      if (!c.models) continue;
+      const buf = IP.copyRect(E.raster, W, c.x0, c.y0, c.w, c.h);
+      if (!IP.unpaintPixels(buf, c.w, 0, 0, c.w, c.h, c.mask, c.w, 0, 0, c.models, COVER_TOL, COVER_LOOSE)) continue;
+      const alpha = new Uint8Array(c.w * c.h);
+      for (let y = 0; y < c.h; y++) {
+        let p = ((c.y0 + y) * W + c.x0) * 4, q = y * c.w * 4;
+        for (let x = 0; x < c.w; x++, p += 4, q += 4) {
+          if (E.raster[p] !== buf[q] || E.raster[p + 1] !== buf[q + 1] || E.raster[p + 2] !== buf[q + 2]) alpha[y * c.w + x] = 255;
+        }
+      }
+      const name = 'PlanTintP' + n++;
+      xobj.put(name, addPlainImage(out, rgbBytes(buf, c.w, 0, 0, c.w, c.h), c.w, c.h, alpha)); nX++;
+      ops.push(`q ${pn(c.w)} 0 0 ${pn(-c.h)} ${pn(c.x0)} ${pn(c.y0 + c.h)} cm /${name} Do Q`);
     }
   }
   // highlights, bottom to top

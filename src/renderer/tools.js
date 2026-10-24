@@ -45,7 +45,7 @@ export const TOOL_INFO = {
 const HINTS = {
   select: 'Click a markup to select it. Shift or Ctrl+click adds more. Drag across empty paper to select by area. Drag to move; drag a corner to reshape.',
   hand: 'Drag to move around the sheet. The wheel zooms at the pointer.',
-  fill: 'Click inside a room or area to fill it. Click an existing fill to give it the current colour. Alt+click picks a colour.',
+  fill: 'Click inside a room or area to fill it. Click an existing fill to give it the current colour. Shift+click adds the area to the highlight next to it. Alt+click picks a colour.',
   polygon: 'Click to place corners. Click the first corner, double-click or press Enter to close. H horizontal, V vertical, A 90° to an edge, Shift ortho.',
   rect: 'Click or drag from corner to corner. Corners snap to walls and lines (hold Ctrl to place freely). After the first corner, type a size. Shift keeps it square.',
   gap: 'Draw a line across a door or opening so Fill stops there. Double-click or Enter to finish. Gap lines never print.',
@@ -750,7 +750,7 @@ const DOWN = {
   },
   fill(e, x, y, dev) {
     if (e.altKey) { pickAt(x, y); return; }
-    runFill(x, y, dev);
+    runFill(x, y, dev, e.shiftKey);
   },
   pin(e, x, y) {
     const hit = pinAt(x, y);
@@ -1135,7 +1135,7 @@ const wallKeys = new WeakMap();
 let wallSeq = 0;
 const wallKey = (m) => { let k = wallKeys.get(m); if (!k) { k = m.id + ':' + (++wallSeq); wallKeys.set(m, k); } return k; };
 
-async function runFill(x, y, dev) {
+async function runFill(x, y, dev, join = false) {
   if (fillBusy) return;
   if (x < 0 || y < 0 || x >= S.doc.W || y >= S.doc.H) return;
   if (inLegend(x, y)) { toast('That is the legend. Move it aside with the Select tool to fill what is under it.'); return; }
@@ -1165,6 +1165,7 @@ async function runFill(x, y, dev) {
       tuck: Math.max(1, Math.round(dpi / 250)),
       walls: S.markups.map((m) => ({ id: m.id, key: wallKey(m), rings: m.rings })),
       force: false,
+      join, // Shift+click: add the area to the highlight next to it
     };
     let res = await engine.call('flood', args);
     if (res.leak) {
@@ -1187,11 +1188,24 @@ async function runFill(x, y, dev) {
     if (res.error === 'covered') { toast('This area is already highlighted.'); return; }
     if (res.error) return;
     let rings = res.rings;
+    const joined = res.joinId ? S.markups.find((m) => m.id === res.joinId) : null;
     const near = S.markups.filter((m) => {
+      if (m === joined) return false;
       const b = geo(m).bbox;
       return !(b[2] < res.bbox[0] || b[0] > res.bbox[2] || b[3] < res.bbox[1] || b[1] > res.bbox[3]);
     });
     if (near.length) rings = G.difference(rings, near.map((m) => m.rings));
+    if (joined) {
+      // one highlight: the one next to it grows over this area and the writing between them
+      const grown = G.unionMany([joined.rings, rings]);
+      if (grown.length) {
+        change('Add to highlight', () => { S.markups = S.markups.map((m) => (m.id === joined.id ? withProps(m, { rings: grown }) : m)); });
+        T.flash = { ids: [joined.id], until: performance.now() + 600 };
+        revealInList(joined.id);
+        return;
+      }
+    }
+    if (join && !joined) toast('No highlight next to this area, so it became a new one.', { timeout: 3500 });
     const piece = G.pieceAt(rings, x, y) || G.pieceAt(rings, Math.floor(x) + 0.5, Math.floor(y) + 0.5);
     if (!piece) { toast('This area is already highlighted.'); return; }
     const name = S.fill.autoName ? nameFromText(piece) : null;

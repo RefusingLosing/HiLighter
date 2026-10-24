@@ -29,8 +29,8 @@ const target = () => (S.selection.size ? selectedMarkups() : null);
 
 function current() {
   const t = target();
-  if (t && t.length) return { color: t[0].color, opacity: t[0].opacity, borderPt: t[0].borderPt, borderColor: t[0].borderColor, borderStyle: t[0].borderStyle || 'solid' };
-  return S.style;
+  if (t && t.length) return { color: t[0].color, opacity: t[0].opacity, borderPt: t[0].borderPt, borderColor: t[0].borderColor, borderStyle: t[0].borderStyle || 'solid', cover: t[0].cover !== false };
+  return { ...S.style, cover: S.style.cover !== false };
 }
 
 function sameAll(key) {
@@ -153,12 +153,18 @@ export function initPanel(root, acts) {
   const bdAuto = h('button', { class: 'seg', id: 'bd-auto', 'data-tip': 'A deeper shade of the fill colour', 'data-tip-side': 'top', onclick: () => applyStyle('Change border colour', { borderColor: null }) }, 'Auto');
   const bdSwatch = h('button', { class: 'seg seg-sw', id: 'bd-sw', 'data-tip': 'Choose the border colour', 'data-tip-side': 'top', onclick: () => { bdColorInput.value = borderColorOf(current()); bdColorInput.click(); } }, h('span', { class: 'mini-sw', id: 'bd-sw-dot' }));
 
+  // on a drawing that is already coloured, the highlight replaces that colour (lines and text stay)
+  const coverInput = h('input', { type: 'checkbox', id: 'cover-check', onchange: (e) => applyStyle(e.target.checked ? 'Cover colour under highlight' : 'Tint colour under highlight', { cover: e.target.checked }) });
+  const coverCheck = h('label', { class: 'check', 'data-tip': 'Takes out colour already painted on the drawing under the highlight, so it shows its own colour. Lines and text stay. Off: the highlight tints that colour, like a highlighter pen.', 'data-tip-side': 'top' },
+    coverInput, h('span', null, 'Cover colour already on the drawing'));
+
   const card = h('section', { class: 'style-card' },
     head, chip, pal, colorRow,
     h('div', { class: 'field' }, h('label', { for: 'op-range' }, 'Opacity'), opRange, opVal),
     h('div', { class: 'field' }, h('label', { for: 'bd-range' }, 'Border'), bdRange, bdVal),
     h('div', { class: 'field field-line' }, h('span', { class: 'sub-label' }, 'Line'), styleSegs),
-    h('div', { class: 'field field-sub' }, h('span', { class: 'sub-label' }, 'Border colour'), h('div', { class: 'segs' }, bdAuto, bdSwatch), bdColorInput));
+    h('div', { class: 'field field-sub' }, h('span', { class: 'sub-label' }, 'Border colour'), h('div', { class: 'segs' }, bdAuto, bdSwatch), bdColorInput),
+    h('div', { class: 'field field-cover' }, coverCheck));
 
   // ---- legend section
   const legSwitch = h('button', { class: 'switch', id: 'leg-switch', role: 'switch', 'aria-checked': 'false', onclick: () => actions.toggleLegend() }, h('span', { class: 'knob' }));
@@ -191,7 +197,7 @@ export function initPanel(root, acts) {
   // on top (style or snag pin) always shows and the list keeps its room
   const mid = h('div', { class: 'panel-mid', id: 'panel-mid' }, legSec, measSec, buildProgress(actions), buildSnags(actions));
   root.append(buildPinCard(actions), card, mid, listSec);
-  els = { opRange, opVal, bdRange, bdVal, hexInput, pal, list, empty, legSwitch, legBody, legSec, styleSegs };
+  els = { opRange, opVal, bdRange, bdVal, hexInput, pal, list, empty, legSwitch, legBody, legSec, styleSegs, coverInput };
 
   list.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT') return;
@@ -395,6 +401,8 @@ export function refreshStyle() {
   document.getElementById('bd-auto').classList.toggle('on', !c.borderColor);
   document.getElementById('bd-sw').classList.toggle('on', !!c.borderColor);
   document.getElementById('bd-sw-dot').style.background = c.borderColor || autoBorder(c.color);
+  els.coverInput.checked = c.cover;
+  els.coverInput.indeterminate = !!(t && t.length > 1 && t.some((m) => (m.cover !== false) !== c.cover));
 }
 
 // ------------------------------------------------------------------ legend
