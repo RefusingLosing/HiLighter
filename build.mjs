@@ -19,7 +19,7 @@ const ICONS = ['mouse-pointer-2', 'hand', 'paint-bucket', 'pentagon', 'square', 
   'folder-open', 'save', 'undo-2', 'redo-2', 'zoom-in', 'zoom-out', 'maximize', 'pen-line', 'trash-2', 'locate', 'eye', 'eye-off', 'keyboard',
   'x', 'check', 'chevron-down', 'plus', 'minus', 'layers', 'copy', 'arrow-up-to-line', 'arrow-down-to-line',
   'file-text', 'file-image', 'image', 'ruler-dimension-line', 'ruler', 'file-spreadsheet', 'tag', 'chevron-right', 'sigma',
-  'map-pin', 'camera', 'chart-pie'];
+  'map-pin', 'camera', 'chart-pie', 'square-arrow-out-up-right'];
 const iconSrc = {};
 for (const n of ICONS) {
   const svg = fs.readFileSync(path.join(root, 'node_modules/lucide-static/icons', n + '.svg'), 'utf8');

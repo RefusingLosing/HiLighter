@@ -505,7 +505,7 @@ import pikepdf
 pdf = pikepdf.open('${OUT}/t9_pins.pdf')
 print(pdf.docinfo.get('/Creator'))
 `]);
-    check(r.ok && r.out.trim() === 'PlanTint 1.5', `the PDF says PlanTint 1.5 made it (${r.out.trim()})`, R);
+    check(r.ok && /^PlanTint 1\.[5-9]$/.test(r.out.trim()), `the PDF says PlanTint made it (${r.out.trim()})`, R);
 
     // ---- the snag list
     await report(app, page, '#sn-report', OUT + '/t9_snags.xlsx');
@@ -556,7 +556,7 @@ print(json.dumps({'sheets': wb.sheetnames, 'rows': rows, 'imgs': imgs, 'h4': ws.
     const zf = unzipSync(new Uint8Array(fs.readFileSync(proj)));
     const meta = JSON.parse(strFromU8(zf['project.json']));
     const photoFiles = Object.keys(zf).filter((k) => k.startsWith('photos/'));
-    check(meta.version === 4 && meta.app === 'PlanTint 1.5' && meta.pins.length === 3 && meta.pinNext === 5 && meta.photos.length === 2 && photoFiles.length === 2,
+    check(meta.version === 4 && /^PlanTint 1\.[5-9]$/.test(meta.app) && meta.pins.length === 3 && meta.pinNext === 5 && meta.photos.length === 2 && photoFiles.length === 2,
       `project v${meta.version}: ${meta.pins.length} pins, next number ${meta.pinNext}, ${photoFiles.length} photos (the deleted pin’s photo is left out)`, R);
     check(meta.progress.on === true && meta.progress.by === 'area' && meta.markups.map((m) => m.prog && m.prog.st).join() === 'done,doing,skip,todo' && meta.markups[3].prog.units === 2,
       `and the progress map (${JSON.stringify(meta.progress)}, ${meta.markups.map((m) => JSON.stringify(m.prog)).join(' ')})`, R);

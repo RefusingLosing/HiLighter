@@ -23,7 +23,8 @@ LAYOUT
                      progresspanel.js), snag pins and their photos (pins.js, snagpanel.js),
                      the Excel writer with pictures (xlsx.js) and the progress and snag
                      reports (reports.js); highlights covering colour already on the drawing
-                     (covers.js)
+                     (covers.js); the markups window, a window of its own that the drawing
+                     page fills in and keeps up to date (markupswin.js)
   src/engine/        a Web Worker that owns the drawing's pixels: renders PDFs with MuPDF,
                      decodes pictures, fill, painted-colour search (detect.js), colour
                      removal (imgproc.js unpaint), snapping (a PDF's own line geometry,
@@ -45,7 +46,8 @@ TESTS
                      t5 are the five 1.1 fixes (PDF export, rectangle guides, line styles,
                      painted colour, eraser), t6 is measuring (1.2), t7 is tabs (1.4), t8 is crash recovery with several copies (1.3),
                      t9 is the progress map and snag pins (1.5; it reads the Excel reports with openpyxl),
-                     t10 is highlights covering colour already on the drawing (1.5.1)
+                     t10 is highlights covering colour already on the drawing (1.5.1),
+                     t11 is the markups window (1.6)
     test/unit/       Node tests of units, typing lengths, visible areas and schedules
                      (measure_test.mjs), of progress, pins and the Excel writer (progress_test.mjs),
                      and of finding and taking out paint under highlights (cover_test.mjs)

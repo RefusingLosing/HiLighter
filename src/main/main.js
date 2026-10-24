@@ -159,7 +159,15 @@ function addTab(rec, startupPath = null) {
   tabs.set(wc.id, t);
   rec.tabs.push(t);
   wc.on('will-navigate', (e) => e.preventDefault());
-  wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+  // the drawing's markups window: an empty page the drawing fills in and keeps up to date itself
+  wc.setWindowOpenHandler(({ url, frameName }) => (url === 'about:blank' && frameName === 'plantint-markups' ? {
+    action: 'allow',
+    overrideBrowserWindowOptions: {
+      width: 980, height: 720, minWidth: 640, minHeight: 360,
+      backgroundColor: '#FFFFFF', title: 'Markups', icon: path.join(__dirname, 'icon.png'), autoHideMenuBar: true,
+      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false },
+    },
+  } : { action: 'deny' }));
   wc.on('before-input-event', (e, input) => tabKeys(rec, e, input));
   wc.on('render-process-gone', (_e, details) => {
     if (details.reason === 'clean-exit') return;

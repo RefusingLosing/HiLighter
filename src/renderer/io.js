@@ -215,7 +215,7 @@ async function buildProject() {
   const photoIds = [...new Set(S.pins.map((p) => p.photo).filter((id) => id && S.photos.has(id)))];
   for (const id of photoIds) files[`photos/${id}.jpg`] = [S.photos.get(id).bytes, { level: 0 }];
   const meta = {
-    format: 'plantint', version: 4, app: 'PlanTint 1.5', saved: new Date().toISOString(),
+    format: 'plantint', version: 4, app: 'PlanTint 1.6', saved: new Date().toISOString(),
     source: {
       name: d.name, kind: d.kind, ext: d.ext, file: srcName, pageIndex: d.pageIndex, pageCount: d.pageCount,
       dpi: d.dpi, W: d.W, H: d.H, pageSizePt: d.pageSizePt, physical: d.physical,

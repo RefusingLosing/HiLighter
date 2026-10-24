@@ -11,6 +11,7 @@ import { progressSummary, progOf } from './progress.js';
 import { photoFile } from './snagpanel.js';
 import { h, icon, initTooltips, showMenu, toast, modalOpen, seg } from './ui.js';
 import { undo, redo, canUndo, canRedo, undoLabel, redoLabel, change } from './history.js';
+import { openMarkupsWindow, markupsWindowOpen } from './markupswin.js';
 import { initCovers, syncCovers, coversIdle } from './covers.js';
 import { initIO, openFromDialog, openFile, openDropped, save, saveAs, initCloseFlow, startRecovery, offerRecovery, isLoading, writeRecovery } from './io.js';
 import { detectColours, detectActive, detectApi, showHelp } from './dialogs.js';
@@ -389,6 +390,7 @@ async function start() {
     setTool, toggleLegend, deleteSelected, duplicate, zoomTo: zoomToIds, requestUI,
     markupMenu: (x, y, id) => markupMenu(x, y, id),
     saveAs: (t) => saveAs(t), undo: () => hooks.undo(),
+    openMarkups: () => openMarkupsWindow({ zoomTo: zoomToIds, undo: () => hooks.undo(), redo: () => hooks.redo(), requestUI }),
   });
   initTools($('ui'), hooks);
   initIO();
@@ -428,7 +430,7 @@ async function start() {
     if (f) openFile(f, true);
   }
   startRecovery();
-  window.__plantint = { S, V, T, hooks, setTool, fit, emit, engine, legendRect, covers: { syncCovers, coversIdle }, writeRecovery, measure, annot, units, legend: { legendLayout, legendRows, legendRect }, progress: { progressSummary, progOf }, pins: { pinSize, PIN_MIN_CSS } }; // used by the automated tests
+  window.__plantint = { S, V, T, hooks, setTool, fit, emit, engine, legendRect, covers: { syncCovers, coversIdle }, markupsWin: { open: () => openMarkupsWindow({ zoomTo: zoomToIds, undo: () => hooks.undo(), redo: () => hooks.redo(), requestUI }), isOpen: markupsWindowOpen }, writeRecovery, measure, annot, units, legend: { legendLayout, legendRows, legendRect }, progress: { progressSummary, progOf }, pins: { pinSize, PIN_MIN_CSS } }; // used by the automated tests
 }
 
 start();

@@ -187,7 +187,7 @@ export function initPanel(root, acts) {
     h('span', { class: 'sec-title' }, 'Markups'), h('span', { class: 'count', id: 'list-count' }, '0'),
     h('span', { class: 'flex' }),
     h('span', { class: 'list-total', id: 'list-total', 'data-tip': 'Total of all markups (visible parts)', 'data-tip-side': 'top' }),
-    h('button', { class: 'tool-mini', 'data-tip': 'Select all', 'data-key': 'Ctrl+A', onclick: () => setSelection(S.markups.map((m) => m.id)), html: icon('layers', 16) }));
+    h('button', { class: 'tool-mini', id: 'mk-window', 'data-tip': 'All markups in a larger window: find, select, rename, recolour and set their status', onclick: () => actions.openMarkups(), html: icon('square-arrow-out-up-right', 16) }));
   const list = h('div', { class: 'mk-list', id: 'mk-list', role: 'listbox', 'aria-multiselectable': 'true', tabindex: '0' });
   const empty = h('div', { class: 'mk-empty', id: 'mk-empty' }, 'Fill an area or draw a polygon. Each markup appears here with its name.');
   const listSec = h('section', { class: 'list-sec' }, listHead, h('div', { class: 'mk-scroll' }, list, empty));

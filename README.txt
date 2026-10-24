@@ -1,18 +1,35 @@
-PlanTint 1.5.1
+PlanTint 1.6.0
 Highlighting and measuring for architectural and technical drawings.
 
 INSTALL
-  PlanTint-Setup-1.5.1.exe
+  PlanTint-Setup-1.6.0.exe
       Installs for your Windows user only (no admin rights needed), adds Start menu and
       desktop shortcuts, and opens .plantint project files when you double-click them.
       Recommended. Installing over an earlier version keeps your settings.
 
-  PlanTint-1.5.1-portable.exe
+  PlanTint-1.6.0-portable.exe
       One file, nothing installed. It unpacks itself each time, so it starts a few
       seconds slower than the installed version.
 
   The program is not code-signed, so Windows may show "Windows protected your PC".
   Click "More info", then "Run anyway".
+
+WHAT'S NEW IN 1.6: THE MARKUPS WINDOW
+  The button at the top right of the markup list (next to the total) opens every markup
+  in a window of its own, with room to work on hundreds of them. Put it beside the
+  drawing or on a second screen; it stays up to date with the drawing both ways.
+  - The table: colour, name, area and perimeter (with a scale), and on the progress map
+    the status, % done and units. Click a column title to sort by it (names in natural
+    order: V2 before V10); # goes back to drawing order.
+  - Find by name (Ctrl+F), or show one colour or one status with the chips at the top.
+  - Click a row to select it on the sheet; Ctrl+click adds, Shift+click selects a range,
+    Ctrl+A or "Select all" selects every row shown. Double-click a row to zoom to it.
+  - Type in a name to rename. Click a swatch to recolour that markup (or all the
+    selected ones it belongs to). The bar above the table recolours, sets the status of,
+    zooms to or deletes everything selected.
+  - Ctrl+Z and Ctrl+Y undo and redo here too; Delete deletes the selected markups; Esc
+    clears the search or the selection; Ctrl+W closes the window.
+  Ctrl+A on the sheet still selects every markup.
 
 WHAT'S NEW IN 1.5.1: HIGHLIGHTS ON LAYOUTS THAT ARE ALREADY COLOURED
   A highlight now shows its own colour on a drawing that already has colour in it, such
@@ -243,10 +260,10 @@ GOOD TO KNOW
   - If a fill would spill over most of the sheet, PlanTint asks before filling.
   - Pictures saved from PlanTint keep the drawing's resolution and print size.
   - Unsaved work is copied every 90 seconds and offered back after a crash.
-  - Projects saved by 1.0 to 1.4 open in 1.5 (a scale typed in 1.1 is kept).
+  - Projects saved by 1.0 to 1.5 open in 1.6 (a scale typed in 1.1 is kept).
 
 LICENCES
   PlanTint uses Electron (MIT), MuPDF (AGPL-3.0), Clipper (Boost), UTIF (MIT),
   fflate (MIT), IBM Plex fonts (SIL OFL) and Lucide icons (ISC).
   Because MuPDF is AGPL, the complete source of this program is included in
-  PlanTint-1.5.1-source.zip.
+  PlanTint-1.6.0-source.zip.
