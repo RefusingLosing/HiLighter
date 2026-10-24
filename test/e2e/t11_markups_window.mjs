@@ -2,7 +2,7 @@
 // of its own: find by name, filter by colour and status, select (the sheet shows the same selection),
 // rename, recolour, set the status, zoom to and delete, all with undo; changes on the sheet show in
 // the window; it stays quick with hundreds of markups.
-import { launch, waitDoc, check, summary, clickSheet, waitMarkups, quit, OUT, DATA } from './lib.mjs';
+import { launch, waitDoc, check, summary, clickSheet, waitMarkups, quit, drawingPages, stubOpen, OUT, DATA } from './lib.mjs';
 
 const R = [];
 let allErrors = [];
@@ -14,6 +14,22 @@ const selection = (page) => S_(page, () => [...window.__plantint.S.selection]);
 const rowNames = (pop) => pop.$$eval('table.mw-t tbody tr', (rs) => rs.map((r) => r.querySelector('.mw-name').value));
 /** Waits until the window shows what the drawing has (it updates on the next turn). */
 const settle = (pop) => pop.waitForTimeout(150);
+const waitFor = async (fn, what, timeout = 15000) => {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeout) {
+    if (await fn()) return true;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  throw new Error('timed out: ' + what);
+};
+/** PlanTint's own window (not the markups window). */
+const mainWindow = (app, fn) => app.evaluate(({ BrowserWindow }, src) => {
+  const w = BrowserWindow.getAllWindows().find((x) => !x.webContents.getURL().startsWith('about:'));
+  return new Function('w', src)(w); // eslint-disable-line no-new-func
+}, fn);
+const windowCount = (app) => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length);
+/** Presses keys that close the page they go to: it can be gone before the key is let go. */
+const pressToClose = (page, keys) => page.keyboard.press(keys).catch((e) => { if (!/closed/i.test(e.message)) throw e; });
 
 async function openWindow(app, page) {
   const popP = app.waitForEvent('window', { timeout: 15000 });
@@ -187,6 +203,12 @@ async function openWindow(app, page) {
     check(!(await S_(page, () => window.__plantint.markupsWin.isOpen())), 'closing the window is noticed', R);
     const pop2 = await openWindow(app, page);
     check((await rowNames(pop2)).length === 5, 'it opens again', R);
+    // Ctrl+W in the window closes the window, not the drawing
+    await pressToClose(pop2, 'Control+w');
+    await waitFor(() => pop2.isClosed(), 'Ctrl+W closes the window');
+    await page.waitForTimeout(1300);
+    check(!(await S_(page, () => window.__plantint.markupsWin.isOpen())) && drawingPages(app).length === 1 && (await markups(page)).length === 5,
+      'Ctrl+W in the window closes the window and leaves the drawing open', R);
     allErrors = allErrors.concat(errors);
   } finally {
     await quit(app);
@@ -228,6 +250,62 @@ async function openWindow(app, page) {
     const recolourMs = Date.now() - t1;
     check(recolourMs < 5000, `selecting the 217 yellow ones and recolouring them takes ${recolourMs} ms`, R);
     allErrors = allErrors.concat(errors);
+  } finally {
+    await quit(app);
+  }
+}
+
+// ---------------------------------------------------------------- the window goes with its drawing
+{
+  const { app, page, errors } = await launch(DATA + '/plan_zones.pdf');
+  try {
+    await waitDoc(page);
+    await page.keyboard.press('f');
+    await clickSheet(page, ...P(1.0, 5.2));
+    await waitMarkups(page, 1);
+    let pop = await openWindow(app, page);
+    // another tab in front: the window stays
+    await page.keyboard.press('Control+n');
+    await waitFor(() => drawingPages(app).length === 2, 'a second tab');
+    const page2 = drawingPages(app).find((p) => p !== page);
+    await page2.waitForFunction(() => window.__plantint && window.__plantint.S, null, { timeout: 60000 });
+    await page.waitForTimeout(500);
+    check(!pop.isClosed(), 'the window stays open while another tab is shown', R);
+    // back to the drawing, and close its tab without saving: its window closes too, PlanTint stays
+    await page2.keyboard.press('Control+Tab');
+    await waitFor(async () => (await mainWindow(app, 'return w.getTitle()')).includes('plan_zones'), 'the drawing shown again');
+    await page.keyboard.press('Control+w');
+    await page.waitForSelector('.modal-title', { timeout: 10000 });
+    await page.click('.modal .btn:text("Cancel")');
+    await page.waitForSelector('.modal-title', { state: 'detached', timeout: 10000 });
+    await page.waitForTimeout(300);
+    check(drawingPages(app).length === 2 && !pop.isClosed(), 'cancelling the question keeps the drawing and its window', R);
+    await page.keyboard.press('Control+w');
+    await page.waitForSelector('.modal-title', { timeout: 10000 });
+    await page.click('.modal .btn:text("Don’t save")');
+    await waitFor(() => drawingPages(app).length === 1, 'the tab closes');
+    const closed = await waitFor(() => pop.isClosed(), 'its window closes').catch(() => false);
+    check(closed && (await windowCount(app)) === 1, `closing a drawing's tab closes its markups window; PlanTint stays open (${await windowCount(app)} window)`, R);
+
+    // closing PlanTint with the window open: the question about the work, then everything closes
+    await stubOpen(app, DATA + '/plan_zones.pdf');
+    await page2.keyboard.press('Control+o');
+    await waitDoc(page2);
+    await page2.keyboard.press('f');
+    await clickSheet(page2, ...P(1.0, 5.2));
+    await waitMarkups(page2, 1);
+    pop = await openWindow(app, page2);
+    await pop.click('.mw-t tbody tr', { position: { x: 120, y: 10 } }); // the window has the focus
+    const exited = new Promise((res) => app.process().once('exit', () => res(true)));
+    await mainWindow(app, 'w.close()');
+    await page2.waitForSelector('.modal-title', { timeout: 10000 });
+    check(/plan_zones/.test(await page2.textContent('.modal-title')), 'closing PlanTint with the window open asks about the unsaved work', R);
+    await page2.click('.modal .btn:text("Don’t save")');
+    const gone = await Promise.race([exited, new Promise((r) => setTimeout(() => r(false), 15000))]);
+    check(gone, 'then PlanTint closes, markups window and all', R);
+    allErrors = allErrors.concat(errors);
+  } catch (e) {
+    check(false, 'closing: ' + e.stack, R);
   } finally {
     await quit(app);
   }

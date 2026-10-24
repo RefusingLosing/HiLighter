@@ -33,6 +33,8 @@ const waitFor = async (fn, what, timeout = 30000) => {
   }
   throw new Error('timed out: ' + what);
 };
+/** Presses keys that close the page: the tab can be gone before the test has let go of the key, which is fine. */
+const pressToClose = (page, keys) => page.keyboard.press(keys).catch((e) => { if (!/closed/i.test(e.message)) throw e; });
 const hasXdotool = (() => { try { execFileSync('xdotool', ['version'], { stdio: 'ignore' }); return true; } catch { return false; } })();
 /** Presses keys on the real keyboard (X11), as a person would. Unlike test keys, these pass through the main process. */
 function realKeys(combo) {
@@ -128,7 +130,7 @@ try {
     await waitFor(() => drawingPages(app).length === 2, 'Ctrl+W from a text box closes the tab');
     check(typing, 'Ctrl+W on the keyboard closes the tab while a text box has the focus', R);
   } else {
-    await pageB.keyboard.press('Control+w');
+    await pressToClose(pageB, 'Control+w');
     await waitFor(() => drawingPages(app).length === 2, 'Ctrl+W closes the tab');
   }
 
@@ -163,7 +165,7 @@ try {
   check((await windowCount(app)) === 1 && (await stripTabs(app)).length === 3, 'still one window, now with three tabs', R);
 
   // 10. Ctrl+W closes a tab with nothing unsaved straight away; the other tabs and the window stay
-  await page3.keyboard.press('Control+w');
+  await pressToClose(page3, 'Control+w');
   await waitFor(() => drawingPages(app).length === 2, 'the drawing without changes closes');
   check((await stripTabs(app)).length === 2 && (await windowCount(app)) === 1, 'Ctrl+W closes just that tab; the window stays open', R);
 
