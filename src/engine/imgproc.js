@@ -629,21 +629,27 @@ const NEAR = new Uint8Array(32768).fill(254); // 254: not worked out yet, 255: n
 
 export function coverPaints(rgba, W, H, x0, y0, w, h, mask, paper, r = 3, minSolid = 200) {
   const nr = 255 / Math.max(paper[0], 1), ng = 255 / Math.max(paper[1], 1), nb = 255 / Math.max(paper[2], 1);
-  const binOf = (p) => {
-    const R = Math.min(255, rgba[p] * nr), G = Math.min(255, rgba[p + 1] * ng), B = Math.min(255, rgba[p + 2] * nb);
-    return ((R >> 3) << 10) | ((G >> 3) << 5) | (B >> 3);
-  };
+  // big areas are looked at on a coarser grid, s pixels apart (fills are large, so nothing is lost)
+  const n0 = w * h;
+  const s = n0 > 6e6 ? 4 : n0 > 2.4e6 ? 3 : n0 > 6e5 ? 2 : 1;
+  const rs = Math.max(1, Math.round(r / s)); // reach, in grid steps
+  const cell = s * s;
+  // the grid: the window and a rim of rs steps; sample (i, j) is pixel (gx0 + i * s, gy0 + j * s)
+  const iw = Math.ceil(w / s), ih = Math.ceil(h / s);
+  const gw = iw + 2 * rs, gh = ih + 2 * rs;
+  const gx0 = x0 - rs * s, gy0 = y0 - rs * s;
+  const norm = (p) => [Math.min(255, rgba[p] * nr), Math.min(255, rgba[p + 1] * ng), Math.min(255, rgba[p + 2] * nb)];
   // 1. the colours under the mask that can be paint, in bins of 8 levels
   const hist = HIST;
   const used = [];
   let total = 0;
-  for (let y = 0; y < h; y++) {
-    const mrow = y * w;
-    let p = ((y0 + y) * W + x0) << 2;
-    for (let x = 0; x < w; x++, p += 4) {
-      if (!mask[mrow + x]) continue;
+  for (let j = 0; j < ih; j++) {
+    const y = j * s;
+    for (let i = 0; i < iw; i++) {
+      const x = i * s;
+      if (!mask[y * w + x]) continue;
       total++;
-      const R = Math.min(255, rgba[p] * nr), G = Math.min(255, rgba[p + 1] * ng), B = Math.min(255, rgba[p + 2] * nb);
+      const [R, G, B] = norm(((y0 + y) * W + x0 + x) << 2);
       if (!paintish(R, G, B)) continue;
       const k = ((R >> 3) << 10) | ((G >> 3) << 5) | (B >> 3);
       if (hist[k]++ === 0) used.push(k);
@@ -656,86 +662,99 @@ export function coverPaints(rgba, W, H, x0, y0, w, h, mask, paper, r = 3, minSol
   for (const k of used) hist[k] = 0;
   if (!total || !bins.length) return [];
   const shades = [];
-  for (let i = 0; i < bins.length; i++) {
-    const k = bins[i];
+  for (let q = 0; q < bins.length; q++) {
+    const k = bins[q];
     const R = ((k >> 10) & 31) * 8 + 4, G = ((k >> 5) & 31) * 8 + 4, B = (k & 31) * 8 + 4;
     let best = -1, bd = 1e9;
     for (let c = 0; c < shades.length; c++) {
-      const s = shades[c];
-      const d = Math.hypot(s.r - R, s.g - G, s.b - B);
+      const sh = shades[c];
+      const d = Math.hypot(sh.r - R, sh.g - G, sh.b - B);
       if (d < bd) { bd = d; best = c; }
     }
-    if (best >= 0 && bd <= 22) shades[best].w += counts[i];
-    else if (shades.length < 160) shades.push({ r: R, g: G, b: B, w: counts[i], fam: -1 });
+    if (best >= 0 && bd <= 22) shades[best].w += counts[q];
+    else if (shades.length < 160) {
+      const neutral = Math.max(R, G, B) - Math.min(R, G, B) < 12;
+      if (neutral && Math.min(R, G, B) >= 240) continue; // as good as paper
+      shades.push({ r: R, g: G, b: B, w: counts[q], fam: -1, reach: neutral ? 30 : 58 });
+    }
   }
   if (!shades.length) return [];
   const seeds = [];
   for (let c = 0; c < shades.length; c++) {
-    const s = shades[c];
-    for (const f of seeds) { const q = shades[f]; if (Math.hypot(q.r - s.r, q.g - s.g, q.b - s.b) <= 48) { s.fam = shades[f].fam; break; } }
-    if (s.fam < 0) { s.fam = seeds.length; seeds.push(c); }
+    const sh = shades[c];
+    for (const f of seeds) { const q = shades[f]; if (Math.hypot(q.r - sh.r, q.g - sh.g, q.b - sh.b) <= 48) { sh.fam = shades[f].fam; break; } }
+    if (sh.fam < 0) { sh.fam = seeds.length; seeds.push(c); }
   }
   const nf = seeds.length;
-  // 3. every pixel of the window and its rim to its nearest shade (within reach), worked out once per colour bin
+  // 3. every sample of the grid to its nearest shade (within reach), worked out once per colour bin; paper never
   const near = NEAR;
   const seen = [];
   const nearest = (k) => {
     const R = ((k >> 10) & 31) * 8 + 4, G = ((k >> 5) & 31) * 8 + 4, B = (k & 31) * 8 + 4;
-    let best = 255, bd = 58;
-    for (let c = 0; c < shades.length; c++) {
-      const s = shades[c];
-      const d = Math.abs(s.r - R) + Math.abs(s.g - G) + Math.abs(s.b - B);
-      if (d < bd) { bd = d; best = c; }
+    let best = 255;
+    if (!(Math.min(R, G, B) >= 244 && Math.max(R, G, B) - Math.min(R, G, B) < 12)) {
+      let bd = 1e9;
+      for (let c = 0; c < shades.length; c++) {
+        const sh = shades[c];
+        const d = Math.abs(sh.r - R) + Math.abs(sh.g - G) + Math.abs(sh.b - B);
+        if (d < sh.reach && d < bd) { bd = d; best = c; }
+      }
     }
     seen.push(k);
     return (near[k] = best);
   };
-  const ex0 = Math.max(0, x0 - r), ey0 = Math.max(0, y0 - r), ex1 = Math.min(W, x0 + w + r), ey1 = Math.min(H, y0 + h + r);
-  const ew = ex1 - ex0, eh = ey1 - ey0;
-  const fam = new Uint8Array(ew * eh).fill(255);
-  const shadeAt = new Uint8Array(ew * eh).fill(255);
-  for (let y = 0; y < eh; y++) {
-    let p = ((ey0 + y) * W + ex0) << 2;
-    for (let x = 0; x < ew; x++, p += 4) {
-      const k = binOf(p);
+  const fam = new Uint8Array(gw * gh).fill(255);
+  const shadeAt = new Uint8Array(gw * gh).fill(255);
+  for (let j = 0; j < gh; j++) {
+    const py = gy0 + j * s;
+    if (py < 0 || py >= H) continue;
+    for (let i = 0; i < gw; i++) {
+      const px = gx0 + i * s;
+      if (px < 0 || px >= W) continue;
+      const [R, G, B] = norm((py * W + px) << 2);
+      const k = ((R >> 3) << 10) | ((G >> 3) << 5) | (B >> 3);
       let c = near[k];
       if (c === 254) c = nearest(k);
-      if (c !== 255) { shadeAt[y * ew + x] = c; fam[y * ew + x] = shades[c].fam; }
+      if (c !== 255) { shadeAt[j * gw + i] = c; fam[j * gw + i] = shades[c].fam; }
     }
   }
   for (const k of seen) near[k] = 254;
   // 4. how much of each fill is solid
   const cnt = new Float64Array(nf), solid = new Float64Array(nf);
-  const sw = new Float64Array(shades.length), sr = new Float64Array(shades.length), sg = new Float64Array(shades.length), sb = new Float64Array(shades.length);
-  for (let y = 0; y < h; y++) {
-    const gy = y0 + y, ly = gy - ey0;
-    for (let x = 0; x < w; x++) {
+  const swt = new Float64Array(shades.length), sr = new Float64Array(shades.length), sg = new Float64Array(shades.length), sb = new Float64Array(shades.length);
+  for (let j = 0; j < ih; j++) {
+    const y = j * s, gj = j + rs;
+    for (let i = 0; i < iw; i++) {
+      const x = i * s;
       if (!mask[y * w + x]) continue;
-      const gx = x0 + x, lx = gx - ex0;
-      const i = ly * ew + lx;
-      const f = fam[i];
+      const g = gj * gw + i + rs;
+      const f = fam[g];
       if (f === 255) continue;
       cnt[f]++;
-      if (lx - r < 0 || lx + r >= ew || ly - r < 0 || ly + r >= eh) continue;
-      if (fam[i - r] !== f || fam[i + r] !== f || fam[i - r * ew] !== f || fam[i + r * ew] !== f) continue;
+      if (fam[g - rs] !== f || fam[g + rs] !== f || fam[g - rs * gw] !== f || fam[g + rs * gw] !== f) continue;
       solid[f]++;
-      const c = shadeAt[i], p = (gy * W + gx) << 2;
-      sw[c]++; sr[c] += rgba[p]; sg[c] += rgba[p + 1]; sb[c] += rgba[p + 2];
+      const c = shadeAt[g], p = ((y0 + y) * W + x0 + x) << 2;
+      swt[c]++; sr[c] += rgba[p]; sg[c] += rgba[p + 1]; sb[c] += rgba[p + 2];
     }
   }
   // 5. the fills: their shades, as the mean colour of the solid pixels of each
   const keep = [];
   for (let f = 0; f < nf; f++) {
-    if (solid[f] < Math.min(minSolid, total * 0.25) || solid[f] < 0.12 * cnt[f]) continue;
+    if (solid[f] * cell < Math.min(minSolid, total * cell * 0.25) || solid[f] < 0.12 * cnt[f]) continue;
     keep.push(f);
   }
   keep.sort((a, b) => solid[b] - solid[a]);
   const out = [];
   for (const f of keep) {
     const own = [];
-    for (let c = 0; c < shades.length; c++) if (shades[c].fam === f && sw[c] >= Math.max(3, solid[f] * 0.01)) own.push(c);
-    own.sort((a, b) => sw[b] - sw[a]);
-    for (const c of own.slice(0, 3)) out.push([sr[c] / sw[c], sg[c] / sw[c], sb[c] / sw[c]]);
+    for (let c = 0; c < shades.length; c++) if (shades[c].fam === f && swt[c] >= Math.max(3, solid[f] * 0.01)) own.push(c);
+    own.sort((a, b) => swt[b] - swt[a]);
+    for (const c of own.slice(0, 3)) {
+      const col = [sr[c] / swt[c], sg[c] / swt[c], sb[c] / swt[c]];
+      const nc = [col[0] * nr, col[1] * ng, col[2] * nb];
+      if (Math.min(...nc) >= 245 && Math.max(...nc) - Math.min(...nc) < 10) continue; // paper
+      out.push(col);
+    }
     if (out.length >= 24) break;
   }
   return out;
