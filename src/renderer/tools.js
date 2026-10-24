@@ -21,6 +21,7 @@ import { setCalibration } from './scale.js';
 import { scaleRatio, fmtScale } from './units.js';
 import { setMeas } from './state.js';
 import { mergeMarkups } from './merge.js';
+import { actionOf, withKeys, keyName } from './keys.js';
 
 let cv = null;
 let hooks = {};
@@ -30,21 +31,21 @@ let ctrlDown = false;
 let lastMoveEvent = null;
 
 export const TOOL_INFO = {
-  select: { label: 'Select and move', key: 'S', icon: 'mouse-pointer-2' },
+  select: { label: 'Select and move', act: 'tool.select', icon: 'mouse-pointer-2' },
   hand: { label: 'Pan the sheet', key: 'Space', icon: 'hand' },
-  fill: { label: 'Fill an enclosed area', key: 'F', icon: 'paint-bucket' },
-  polygon: { label: 'Draw a polygon', key: 'P', icon: 'pentagon' },
-  rect: { label: 'Draw a rectangle', key: 'R', icon: 'square' },
-  gap: { label: 'Close a gap for Fill', key: 'G', icon: 'fence' },
-  dim: { label: 'Dimension: measure between two points', key: 'K', icon: 'ruler-dimension-line' },
-  calib: { label: 'Calibrate the scale from a known length', key: 'C', icon: 'ruler' },
-  pick: { label: 'Pick a colour from the sheet', key: 'I', icon: 'pipette' },
-  erase: { label: 'Eraser: highlights and colour in the drawing', key: 'E', icon: 'eraser' },
-  pin: { label: 'Snag pin: mark a defect', key: 'X', icon: 'map-pin' },
+  fill: { label: 'Fill an enclosed area', act: 'tool.fill', icon: 'paint-bucket' },
+  polygon: { label: 'Draw a polygon', act: 'tool.polygon', icon: 'pentagon' },
+  rect: { label: 'Draw a rectangle', act: 'tool.rect', icon: 'square' },
+  gap: { label: 'Close a gap for Fill', act: 'tool.gap', icon: 'fence' },
+  dim: { label: 'Dimension: measure between two points', act: 'tool.dim', icon: 'ruler-dimension-line' },
+  calib: { label: 'Calibrate the scale from a known length', act: 'tool.calib', icon: 'ruler' },
+  pick: { label: 'Pick a colour from the sheet', act: 'tool.pick', icon: 'pipette' },
+  erase: { label: 'Eraser: highlights and colour in the drawing', act: 'tool.erase', icon: 'eraser' },
+  pin: { label: 'Snag pin: mark a defect', act: 'tool.pin', icon: 'map-pin' },
 };
 
 const HINTS = {
-  select: 'Click a markup to select it. Shift or Ctrl+click adds more. Drag across empty paper to select by area. Drag to move; drag a corner to reshape. Ctrl+M merges the selected.',
+  select: 'Click a markup to select it. Shift or Ctrl+click adds more. Drag across empty paper to select by area. Drag to move; drag a corner to reshape. {edit.merge} merges the selected.',
   hand: 'Drag to move around the sheet. The wheel zooms at the pointer.',
   fill: 'Click inside a room or area to fill it. Click an existing fill to give it the current colour. Shift+click adds the area to the highlight next to it. Alt+click picks a colour.',
   polygon: 'Click to place corners. Click the first corner, double-click or press Enter to close. H horizontal, V vertical, A 90° to an edge, Shift ortho.',
@@ -106,7 +107,7 @@ export function setTool(name) {
   requestAll();
 }
 
-export function hintFor(tool) { return HINTS[tool] || ''; }
+export function hintFor(tool) { return withKeys(HINTS[tool] || ''); }
 
 /** Drops anything half-drawn (used when another drawing opens). */
 export function resetInteraction() {
@@ -485,7 +486,7 @@ function onContext(e) {
     showMenu(e.clientX, e.clientY, [
       { label: 'Move the line to the other side', icon: 'arrow-down-to-line', disabled: n !== 1 || !dm.off, onClick: () => flipDim(dm.id) },
       'sep',
-      { label: n > 1 ? `Delete ${n} items` : 'Delete dimension', key: 'Del', icon: 'trash-2', danger: true, onClick: deleteSelected },
+      { label: n > 1 ? `Delete ${n} items` : 'Delete dimension', act: 'edit.delete', icon: 'trash-2', danger: true, onClick: deleteSelected },
     ]);
     return;
   }
@@ -503,12 +504,12 @@ function onContext(e) {
     return;
   }
   showMenu(e.clientX, e.clientY, [
-    { label: 'Paste', key: 'Ctrl+V', icon: 'copy', disabled: !clipboard.length, onClick: paste },
-    { label: 'Select all', key: 'Ctrl+A', icon: 'layers', disabled: !S.markups.length && !S.pins.length, onClick: selectAll },
+    { label: 'Paste', act: 'edit.paste', icon: 'copy', disabled: !clipboard.length, onClick: paste },
+    { label: 'Select all', act: 'edit.selectAll', icon: 'layers', disabled: !S.markups.length && !S.pins.length, onClick: selectAll },
     'sep',
     { label: 'Remove colour in this area of the drawing', icon: 'eraser', onClick: () => eraseColourAreaAt(x, y, dev) },
     'sep',
-    { label: 'Fit sheet to window', key: 'Ctrl+0', icon: 'maximize', onClick: () => { fit(); requestAll(); emit('view'); } },
+    { label: 'Fit sheet to window', act: 'view.fit', icon: 'maximize', onClick: () => { fit(); requestAll(); emit('view'); } },
   ]);
 }
 
@@ -524,7 +525,7 @@ function pinMenu(cx, cy) {
     { label: 'Edit note', icon: 'pen-line', disabled: n !== 1, onClick: editPinNote },
     { label: n > 1 ? 'Zoom to these' : 'Zoom to it', icon: 'locate', onClick: () => zoomToIds(pins.map((p) => p.id)) },
     'sep',
-    { label: S.selection.size > 1 ? (S.selection.size === n ? `Delete ${n} pins` : `Delete ${S.selection.size} items`) : 'Delete pin', key: 'Del', icon: 'trash-2', danger: true, onClick: deleteSelected },
+    { label: S.selection.size > 1 ? (S.selection.size === n ? `Delete ${n} pins` : `Delete ${S.selection.size} items`) : 'Delete pin', act: 'edit.delete', icon: 'trash-2', danger: true, onClick: deleteSelected },
   ]);
 }
 
@@ -539,18 +540,18 @@ export function markupMenu(cx, cy, id) {
   const nm = selectedMarkups().length;
   const target = S.markups.find((m) => m.id === id);
   showMenu(cx, cy, [
-    { label: 'Rename', key: 'F2', icon: 'pen-line', disabled: n !== 1, onClick: () => startRename(id) },
+    { label: 'Rename', act: 'edit.rename', icon: 'pen-line', disabled: n !== 1, onClick: () => startRename(id) },
     { label: n > 1 ? 'Zoom to these' : 'Zoom to it', icon: 'locate', onClick: () => zoomToIds([...S.selection]) },
-    { label: 'Duplicate', key: 'Ctrl+D', icon: 'copy', onClick: duplicate },
+    { label: 'Duplicate', act: 'edit.duplicate', icon: 'copy', onClick: duplicate },
     // merging: the markup right-clicked is the one the others go into
-    ...(nm >= 2 && target && S.selection.has(id) ? [{ label: `Merge ${nm} into “${shortName(target.name)}”`, key: 'Ctrl+M', icon: 'squares-unite', onClick: () => mergeSelected(id) }] : []),
+    ...(nm >= 2 && target && S.selection.has(id) ? [{ label: `Merge ${nm} into “${shortName(target.name)}”`, act: 'edit.merge', icon: 'squares-unite', onClick: () => mergeSelected(id) }] : []),
     ...(tagsVisible() && S.markups.some((m) => S.selection.has(m.id) && m.tagAt) ? [{ label: 'Put the tag back in the middle', icon: 'tag', onClick: resetTags }] : []),
     ...(progressOn() ? ['sep', ...STATUSES.map((st) => ({ label: st.label, key: st.key, icon: cur === st.id ? 'check' : null, onClick: () => setZoneProg({ st: st.id }) }))] : []),
     'sep',
     { label: 'Bring to front', icon: 'arrow-up-to-line', onClick: () => reorder(true) },
     { label: 'Send to back', icon: 'arrow-down-to-line', onClick: () => reorder(false) },
     'sep',
-    { label: n > 1 ? (S.dims.some((d) => S.selection.has(d.id)) || S.pins.some((p) => S.selection.has(p.id)) ? `Delete ${n} items` : `Delete ${n} markups`) : 'Delete', key: 'Del', icon: 'trash-2', danger: true, onClick: deleteSelected },
+    { label: n > 1 ? (S.dims.some((d) => S.selection.has(d.id)) || S.pins.some((p) => S.selection.has(p.id)) ? `Delete ${n} items` : `Delete ${n} markups`) : 'Delete', act: 'edit.delete', icon: 'trash-2', danger: true, onClick: deleteSelected },
   ]);
 }
 
@@ -1775,19 +1776,26 @@ function onKeyDown(e) {
   if (modalOpen() || typing(e)) return;
   const k = e.key;
   const ctrl = e.ctrlKey || e.metaKey;
-  if (ctrl && (k === 'o' || k === 'O')) { e.preventDefault(); hooks.open(); return; }
+  // the key's place on the keyboard, so the fixed keys below work whatever language the keyboard is in
+  const place = keyName(e.code, k);
   // Ctrl+N, Ctrl+W and Ctrl+Tab are tab keys. The main process takes them before they reach the page; keys sent
   // by automation (the tests) skip that step and arrive here, so they are passed on.
-  if (ctrl && !e.altKey && (k === 'Tab' || (!e.shiftKey && /^[nw]$/i.test(k)))) { e.preventDefault(); window.plantint.tabKey(k === 'Tab' ? 'Tab' : k.toLowerCase(), e.shiftKey); return; }
-  if (ctrl && (k === 's' || k === 'S')) { e.preventDefault(); hooks.save(e.shiftKey); return; }
-  if (ctrl && !e.shiftKey && (k === 'z' || k === 'Z')) { e.preventDefault(); if (T.poly && T.poly.pts.length) { T.poly.pts.length -= 2; if (!T.poly.pts.length) T.poly = null; requestUI(); } else hooks.undo(); return; }
-  if (ctrl && (k === 'y' || k === 'Y' || ((k === 'z' || k === 'Z') && e.shiftKey))) { e.preventDefault(); hooks.redo(); return; }
+  if (ctrl && !e.altKey && (k === 'Tab' || (!e.shiftKey && (place === 'N' || place === 'W')))) { e.preventDefault(); window.plantint.tabKey(k === 'Tab' ? 'Tab' : place.toLowerCase(), e.shiftKey); return; }
+  // the keys set in Preferences (see keys.js)
+  const act = actionOf(e);
+  if (act === 'file.open') { e.preventDefault(); hooks.open(); return; }
+  if (act === 'file.save' || act === 'file.saveAs') { e.preventDefault(); hooks.save(act === 'file.saveAs'); return; }
+  if (act === 'edit.undo') { e.preventDefault(); if (T.poly && T.poly.pts.length) { T.poly.pts.length -= 2; if (!T.poly.pts.length) T.poly = null; requestUI(); } else hooks.undo(); return; }
+  if (act === 'edit.redo') { e.preventDefault(); hooks.redo(); return; }
+  if (act === 'prefs') { e.preventDefault(); hooks.prefs && hooks.prefs(); return; }
+  if (act === 'help') { e.preventDefault(); hooks.help(); return; }
   if (!S.doc) return;
   if (detectMode()) { if (k === 'Escape') { e.preventDefault(); hooks.detectEscape(); } return; }
   // typing a size for the rectangle being drawn
-  if (S.tool === 'rect' && T.rect && T.rect.waiting && !ctrl && !e.altKey && /^[0-9.,]$/.test(k)) {
+  const digit = /^Digit\d$/.test(e.code) ? e.code.slice(5) : /^Numpad\d$/.test(e.code) ? e.code.slice(6) : /^[0-9]$/.test(k) ? k : null;
+  if (S.tool === 'rect' && T.rect && T.rect.waiting && !ctrl && !e.altKey && (digit !== null || /^[.,]$/.test(k) || e.code === 'NumpadDecimal')) {
     e.preventDefault();
-    openDimInput(k === ',' ? '.' : k);
+    openDimInput(digit !== null ? digit : '.');
     return;
   }
   if (S.tool === 'rect' && T.rect && T.rect.waiting && k === 'Tab') { e.preventDefault(); openDimInput(''); return; }
@@ -1797,7 +1805,7 @@ function onKeyDown(e) {
     if (k === 'Backspace' || k === 'Delete') { e.preventDefault(); T.poly.pts.length -= 2; if (!T.poly.pts.length) T.poly = null; requestUI(); return; }
   }
   if (S.tool === 'polygon' && !ctrl && !e.altKey) {
-    const lk = k.toLowerCase();
+    const lk = (place || '').toLowerCase();
     if (lk === 'h' || lk === 'v') { e.preventDefault(); S.lock.once = S.lock.once === lk ? null : lk; emit('lock'); refreshPolyCursor(); return; }
     if (lk === 'a') { e.preventDefault(); cyclePerp(); return; }
     if (lk === 'n') { e.preventDefault(); S.lock.mode = 'free'; S.lock.once = null; S.lock.extRef = null; emit('lock'); refreshPolyCursor(); return; }
@@ -1820,27 +1828,13 @@ function onKeyDown(e) {
     if (!spaceDown) { spaceDown = true; updateCursor(); }
     return;
   }
-  if (ctrl && (k === 'a' || k === 'A')) { e.preventDefault(); selectAll(); return; }
-  if (ctrl && (k === 'c' || k === 'C')) { e.preventDefault(); copySelected(); return; }
-  if (ctrl && (k === 'v' || k === 'V')) {
-    // one pin selected: the paste event brings a copied photo to it (see main.js)
-    if (S.selection.size === 1 && selectedPins().length === 1) return;
-    e.preventDefault(); paste(); return;
-  }
-  if (ctrl && (k === 'd' || k === 'D')) { e.preventDefault(); duplicate(); return; }
-  if (ctrl && !e.shiftKey && (k === 'm' || k === 'M' || e.code === 'KeyM')) { e.preventDefault(); mergeSelected(); return; }
-  if (ctrl && (k === '0')) { e.preventDefault(); fit(); requestAll(); emit('view'); return; }
-  if (ctrl && (k === '1')) { e.preventDefault(); setZoomPercent(100); requestAll(); emit('view'); return; }
-  if (k === 'Delete' || (k === 'Backspace' && S.tool === 'select')) { e.preventDefault(); deleteSelected(); return; }
+  if (act) { if (runAction(act)) e.preventDefault(); return; }
+  if (k === 'Backspace' && S.tool === 'select' && !ctrl) { e.preventDefault(); deleteSelected(); return; }
   if (k === 'Escape') {
     if (T.rect || T.gap || T.poly || T.dim || T.calibLine) { cancelDrawing(); requestUI(); return; }
     if (S.selection.size || S.legendSelected) setSelection([]);
     return;
   }
-  if (k === 'F2') { e.preventDefault(); const s = selectedMarkups(); if (s.length === 1) startRename(s[0].id); return; }
-  if (k === 'F1' || k === '?') { e.preventDefault(); hooks.help(); return; }
-  if (k === '+' || k === '=') { e.preventDefault(); zoomAt(V.cw / 2, V.ch / 2, 1.25); requestAll(); emit('view'); return; }
-  if (k === '-' || k === '_') { e.preventDefault(); zoomAt(V.cw / 2, V.ch / 2, 0.8); requestAll(); emit('view'); return; }
   if (k.startsWith('Arrow') && (S.selection.size || S.legendSelected)) {
     e.preventDefault();
     const step = e.shiftKey ? 10 : 1;
@@ -1848,15 +1842,15 @@ function onKeyDown(e) {
     nudge(k === 'ArrowLeft' ? -d : k === 'ArrowRight' ? d : 0, k === 'ArrowUp' ? -d : k === 'ArrowDown' ? d : 0);
     return;
   }
-  if (k === '[' || k === ']') {
+  if (place === '[' || place === ']') {
     if (S.tool === 'erase') {
-      S.eraser.size = Math.max(6, Math.min(240, Math.round(S.eraser.size * (k === ']' ? 1.25 : 0.8))));
+      S.eraser.size = Math.max(6, Math.min(240, Math.round(S.eraser.size * (place === ']' ? 1.25 : 0.8))));
       emit('eraser');
       if (T.brush) { T.brush.r = brushRadius(); requestUI(); }
     } else if (S.loupe.on) {
       const steps = [2, 3, 4, 6, 8];
       const i = steps.indexOf(S.loupe.power);
-      S.loupe.power = steps[Math.max(0, Math.min(steps.length - 1, i + (k === ']' ? 1 : -1)))];
+      S.loupe.power = steps[Math.max(0, Math.min(steps.length - 1, i + (place === ']' ? 1 : -1)))];
       emit('loupe');
     }
     return;
@@ -1864,23 +1858,42 @@ function onKeyDown(e) {
   if (ctrl || e.altKey) return;
   // status keys: 1 2 3 for the selected pins (Open, Fixed, Closed); with the progress map on, 1 2 3 0 for the
   // selected zones (Not started, In progress, Done, Not counted)
-  if (/^[0-3]$/.test(k) && S.selection.size) {
+  if (digit !== null && /^[0-3]$/.test(digit) && S.selection.size) {
     const zones = progressOn() && selectedMarkups().length > 0;
-    const pinSt = PIN_STATUSES.find((x) => x.key === k);
+    const pinSt = PIN_STATUSES.find((x) => x.key === digit);
     if (zones) {
-      const st = STATUSES.find((x) => x.key === k);
+      const st = STATUSES.find((x) => x.key === digit);
       if (st) { e.preventDefault(); setZoneProg({ st: st.id }); }
       return;
     }
     if (pinSt && selectedPins().length) { e.preventDefault(); setPinStatus(pinSt.id); }
-    return;
   }
-  const map = { s: 'select', f: 'fill', p: 'polygon', r: 'rect', g: 'gap', i: 'pick', e: 'erase', k: 'dim', c: 'calib', x: 'pin' };
-  const lk = k.toLowerCase();
-  if (map[lk]) { e.preventDefault(); setTool(map[lk]); return; }
-  if (lk === 'm') { e.preventDefault(); hooks.toggleLoupe(); return; }
-  if (lk === 'l') { e.preventDefault(); hooks.toggleLegend(); return; }
-  if (lk === 'd') { e.preventDefault(); hooks.detect(); return; }
+}
+
+/** Does what a key from Preferences is for. False when it does nothing here (the key goes on). */
+function runAction(act) {
+  if (act.startsWith('tool.')) { setTool(act.slice(5)); return true; }
+  switch (act) {
+    case 'edit.selectAll': selectAll(); return true;
+    case 'edit.copy': copySelected(); return true;
+    case 'edit.paste':
+      // one pin selected: the paste event brings a copied photo to it (see main.js)
+      if (S.selection.size === 1 && selectedPins().length === 1) return false;
+      paste(); return true;
+    case 'edit.duplicate': duplicate(); return true;
+    case 'edit.merge': mergeSelected(); return true;
+    case 'edit.delete': deleteSelected(); return true;
+    case 'edit.rename': { const s = selectedMarkups(); if (s.length === 1) startRename(s[0].id); return true; }
+    case 'view.fit': fit(); requestAll(); emit('view'); return true;
+    case 'view.real': setZoomPercent(100); requestAll(); emit('view'); return true;
+    case 'view.zoomIn': zoomAt(V.cw / 2, V.ch / 2, 1.25); requestAll(); emit('view'); return true;
+    case 'view.zoomOut': zoomAt(V.cw / 2, V.ch / 2, 0.8); requestAll(); emit('view'); return true;
+    case 'view.loupe': hooks.toggleLoupe(); return true;
+    case 'view.legend': hooks.toggleLegend(); return true;
+    case 'detect': hooks.detect(); return true;
+    case 'markups.window': if (hooks.openMarkups) hooks.openMarkups(); return true;
+    default: return false;
+  }
 }
 
 function onKeyUp(e) {

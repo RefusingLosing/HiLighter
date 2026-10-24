@@ -14,7 +14,7 @@ for u in measure progress cover merge; do
   else echo "FAILED (see /tmp/plantint-unit-$u.log)"; grep FAIL "/tmp/plantint-unit-$u.log"; fails=$((fails+1)); fi
 done
 node test/harness/pdf_export_test.mjs >/dev/null && python3 test/pdfcheck/check_basic.py | tail -1 && python3 test/pdfcheck/check_layers.py | tail -1 || fails=$((fails+1))
-for t in t0_regression t1_pdf_export t1b_sources t2_rect t3_linestyle t4_detect t5_eraser t6_measure t7_tabs t8_recovery t9_progress_snags t10_cover t11_markups_window t12_merge; do
+for t in t0_regression t1_pdf_export t1b_sources t2_rect t3_linestyle t4_detect t5_eraser t6_measure t7_tabs t8_recovery t9_progress_snags t10_cover t11_markups_window t12_merge t13_prefs; do
   printf '%-18s ' "$t"
   if xvfb-run -a -s "-screen 0 1920x1080x24" node "test/e2e/$t.mjs" > "/tmp/plantint-$t.log" 2>&1; then
     tail -1 "/tmp/plantint-$t.log"

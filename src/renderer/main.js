@@ -12,6 +12,9 @@ import { photoFile } from './snagpanel.js';
 import { h, icon, initTooltips, showMenu, toast, modalOpen, seg } from './ui.js';
 import { undo, redo, canUndo, canRedo, undoLabel, redoLabel, change } from './history.js';
 import { openMarkupsWindow, markupsWindowOpen } from './markupswin.js';
+import { openPrefs, prefsMenu } from './prefsdialog.js';
+import { prefs, setPrefs, resetPrefs, onPrefs } from './prefs.js';
+import * as keys from './keys.js';
 import { initCovers, syncCovers, coversIdle } from './covers.js';
 import { initIO, openFromDialog, openFile, openDropped, save, saveAs, initCloseFlow, startRecovery, offerRecovery, isLoading, writeRecovery } from './io.js';
 import { detectColours, detectActive, detectApi, showHelp } from './dialogs.js';
@@ -52,6 +55,8 @@ const hooks = {
   detectHover: (x, y) => { const a = detectApi(); if (a) a.hover(x, y); },
   detectCursor: () => { const a = detectApi(); return a ? a.cursor() : 'default'; },
   detectEscape: () => { const a = detectApi(); if (a) a.escape(); },
+  prefs: (page) => openPrefs(page),
+  openMarkups: () => { if (S.doc) openMarkupsWindow(windowActions()); },
 };
 
 async function doUndo() {
@@ -90,14 +95,14 @@ function toggleLoupe() {
 
 function buildTopbar() {
   const bar = $('topbar');
-  const openBtn = h('button', { class: 'tb-btn', id: 'btn-open', 'data-tip': 'Open a drawing or project', 'data-key': 'Ctrl+O', onclick: hooks.open });
+  const openBtn = h('button', { class: 'tb-btn', id: 'btn-open', 'data-tip': 'Open a drawing or project', 'data-act': 'file.open', onclick: hooks.open });
   openBtn.innerHTML = icon('folder-open', 17) + '<span>Open</span>';
-  const saveBtn = h('button', { class: 'tb-btn split-l', id: 'btn-save', 'data-tip': 'Save the project, a PDF or a picture', 'data-key': 'Ctrl+S', onclick: () => save(false) });
+  const saveBtn = h('button', { class: 'tb-btn split-l', id: 'btn-save', 'data-tip': 'Save the project, a PDF or a picture', 'data-act': 'file.save', onclick: () => save(false) });
   saveBtn.innerHTML = icon('save', 17) + '<span>Save</span>';
   const saveMore = h('button', { class: 'tb-btn split-r', id: 'btn-save-more', 'aria-label': 'More save options', onclick: (e) => {
     const r = e.currentTarget.getBoundingClientRect();
     showMenu(r.left, r.bottom + 4, [
-      { label: 'Save as… (choose file type)', key: 'Ctrl+Shift+S', icon: 'save', onClick: () => saveAs() },
+      { label: 'Save as… (choose file type)', act: 'file.saveAs', icon: 'save', onClick: () => saveAs() },
       'sep',
       { label: 'Save as PDF…', icon: 'file-text', onClick: () => saveAs('pdf') },
       { label: 'Save as flattened PDF…', icon: 'file-image', onClick: () => saveAs('pdfflat') },
@@ -105,24 +110,25 @@ function buildTopbar() {
     ]);
   } });
   saveMore.innerHTML = icon('chevron-down', 14);
-  const undoBtn = h('button', { class: 'tb-icon', id: 'btn-undo', 'data-tip': 'Undo', 'data-key': 'Ctrl+Z', onclick: hooks.undo, html: icon('undo-2', 18) });
-  const redoBtn = h('button', { class: 'tb-icon', id: 'btn-redo', 'data-tip': 'Redo', 'data-key': 'Ctrl+Y', onclick: hooks.redo, html: icon('redo-2', 18) });
-  const zoomOut = h('button', { class: 'tb-icon', 'data-tip': 'Zoom out', 'data-key': '−', onclick: () => { zoomAt(V.cw / 2, V.ch / 2, 0.8); requestAll(); emit('view'); }, html: icon('zoom-out', 18) });
-  const zoomIn = h('button', { class: 'tb-icon', 'data-tip': 'Zoom in', 'data-key': '+', onclick: () => { zoomAt(V.cw / 2, V.ch / 2, 1.25); requestAll(); emit('view'); }, html: icon('zoom-in', 18) });
+  const undoBtn = h('button', { class: 'tb-icon', id: 'btn-undo', 'data-tip': 'Undo', 'data-act': 'edit.undo', onclick: hooks.undo, html: icon('undo-2', 18) });
+  const redoBtn = h('button', { class: 'tb-icon', id: 'btn-redo', 'data-tip': 'Redo', 'data-act': 'edit.redo', onclick: hooks.redo, html: icon('redo-2', 18) });
+  const zoomOut = h('button', { class: 'tb-icon', 'data-tip': 'Zoom out', 'data-act': 'view.zoomOut', onclick: () => { zoomAt(V.cw / 2, V.ch / 2, 0.8); requestAll(); emit('view'); }, html: icon('zoom-out', 18) });
+  const zoomIn = h('button', { class: 'tb-icon', 'data-tip': 'Zoom in', 'data-act': 'view.zoomIn', onclick: () => { zoomAt(V.cw / 2, V.ch / 2, 1.25); requestAll(); emit('view'); }, html: icon('zoom-in', 18) });
   const pct = h('button', { class: 'zoom-pct', id: 'zoom-pct', 'data-tip': '100% is the sheet at its printed size', onclick: (e) => {
     const r = e.currentTarget.getBoundingClientRect();
     const z = (p) => () => { setZoomPercent(p); requestAll(); emit('view'); };
     showMenu(r.left, r.bottom + 4, [
-      { label: 'Fit sheet', key: 'Ctrl+0', icon: 'maximize', onClick: () => { fit(); requestAll(); emit('view'); } },
+      { label: 'Fit sheet', act: 'view.fit', icon: 'maximize', onClick: () => { fit(); requestAll(); emit('view'); } },
       'sep',
-      { label: '25%', onClick: z(25) }, { label: '50%', onClick: z(50) }, { label: '100% (printed size)', key: 'Ctrl+1', onClick: z(100) },
+      { label: '25%', onClick: z(25) }, { label: '50%', onClick: z(50) }, { label: '100% (printed size)', act: 'view.real', onClick: z(100) },
       { label: '200%', onClick: z(200) }, { label: '400%', onClick: z(400) },
       'sep',
       { label: 'Zoom to selection', icon: 'locate', disabled: !S.selection.size, onClick: () => zoomToIds([...S.selection]) },
     ]);
   } }, '100%');
-  const fitBtn = h('button', { class: 'tb-icon', 'data-tip': 'Fit the sheet', 'data-key': 'Ctrl+0', onclick: () => { fit(); requestAll(); emit('view'); }, html: icon('maximize', 18) });
-  const helpBtn = h('button', { class: 'tb-icon', 'data-tip': 'Keys and mouse', 'data-key': 'F1', onclick: hooks.help, html: icon('keyboard', 18) });
+  const fitBtn = h('button', { class: 'tb-icon', 'data-tip': 'Fit the sheet', 'data-act': 'view.fit', onclick: () => { fit(); requestAll(); emit('view'); }, html: icon('maximize', 18) });
+  const helpBtn = h('button', { class: 'tb-icon', 'data-tip': 'Keys and mouse', 'data-act': 'help', onclick: hooks.help, html: icon('keyboard', 18) });
+  const prefsBtn = h('button', { class: 'tb-icon', id: 'btn-prefs', 'data-tip': 'Preferences', 'data-act': 'prefs', 'aria-label': 'Preferences', onclick: (e) => prefsMenu(e.currentTarget, hooks), html: icon('settings', 18) });
   bar.append(
     h('div', { class: 'brand', html: BRAND + '<span class="brand-name">PlanTint</span>' }),
     h('div', { class: 'tb-group' }, openBtn, h('div', { class: 'split' }, saveBtn, saveMore)),
@@ -133,7 +139,7 @@ function buildTopbar() {
     h('div', { class: 'tb-spacer' }),
     h('div', { class: 'tb-group zoom' }, zoomOut, pct, zoomIn, fitBtn),
     h('div', { class: 'tb-sep' }),
-    helpBtn);
+    helpBtn, prefsBtn);
   const upd = () => {
     undoBtn.disabled = !canUndo();
     redoBtn.disabled = !canRedo();
@@ -156,15 +162,15 @@ function buildRail() {
     if (gi) rail.append(h('div', { class: 'rail-sep' }));
     for (const t of g) {
       const info = TOOL_INFO[t];
-      const b = h('button', { class: 'rail-btn', 'data-tool': t, 'data-tip': info.label, 'data-key': info.key, 'aria-label': info.label, onclick: () => setTool(t), html: icon(info.icon, 20) });
+      const b = h('button', { class: 'rail-btn', 'data-tool': t, 'data-tip': info.label, 'data-key': info.act ? null : info.key, 'data-act': info.act || null, 'aria-label': info.label, onclick: () => setTool(t), html: icon(info.icon, 20) });
       btns[t] = b;
       rail.append(b);
     }
   });
   rail.append(h('div', { class: 'rail-sep' }));
-  const loupeBtn = h('button', { class: 'rail-btn toggle', 'data-tip': 'Magnifier', 'data-key': 'M', 'aria-label': 'Magnifier', 'aria-pressed': 'false', onclick: toggleLoupe, html: icon('search', 20) });
-  const legendBtn = h('button', { class: 'rail-btn toggle', 'data-tip': 'Legend on sheet', 'data-key': 'L', 'aria-label': 'Legend on sheet', 'aria-pressed': 'false', onclick: () => toggleLegend(), html: icon('table-2', 20) });
-  const detectBtn = h('button', { class: 'rail-btn toggle', 'data-tip': 'Find colour already painted in the drawing', 'data-key': 'D', 'aria-label': 'Find painted colour', onclick: hooks.detect, html: icon('swatch-book', 20) });
+  const loupeBtn = h('button', { class: 'rail-btn toggle', 'data-tip': 'Magnifier', 'data-act': 'view.loupe', 'aria-label': 'Magnifier', 'aria-pressed': 'false', onclick: toggleLoupe, html: icon('search', 20) });
+  const legendBtn = h('button', { class: 'rail-btn toggle', 'data-tip': 'Legend on sheet', 'data-act': 'view.legend', 'aria-label': 'Legend on sheet', 'aria-pressed': 'false', onclick: () => toggleLegend(), html: icon('table-2', 20) });
+  const detectBtn = h('button', { class: 'rail-btn toggle', 'data-tip': 'Find colour already painted in the drawing', 'data-act': 'detect', 'aria-label': 'Find painted colour', onclick: hooks.detect, html: icon('swatch-book', 20) });
   rail.append(loupeBtn, legendBtn, detectBtn);
   const upd = () => {
     for (const [t, b] of Object.entries(btns)) { b.classList.toggle('on', S.tool === t && !detectActive()); b.disabled = !S.doc; }
@@ -190,7 +196,7 @@ function scaleControl() {
       return h('span', { class: 'opt', 'data-tip': 'Calibrated from a known length. Calibrate again (C) to change it.', 'data-tip-side': 'top' }, h('span', { class: 'opt-note' }, 'Calibrated: ' + fmtScale()), unit);
     }
     return h('span', { class: 'opt' }, h('span', { class: 'opt-note muted', 'data-tip': 'This picture has no print size. Calibrate from a known length to measure real sizes.', 'data-tip-side': 'top' }, 'Sizes in pixels'),
-      h('button', { class: 'btn small', 'data-tip': 'Click both ends of a length you know, then type it', 'data-key': 'C', 'data-tip-side': 'top', onclick: () => setTool('calib') }, 'Calibrate'));
+      h('button', { class: 'btn small', 'data-tip': 'Click both ends of a length you know, then type it', 'data-act': 'tool.calib', 'data-tip-side': 'top', onclick: () => setTool('calib') }, 'Calibrate'));
   }
   const n = scaleRatio();
   const shown = n > 0 ? (Math.abs(n - Math.round(n)) < 0.05 ? String(Math.round(n)) : n.toFixed(1)) : '';
@@ -290,7 +296,7 @@ function buildStatus() {
   };
   const snapToggle = () => h('label', { class: 'check', 'data-tip': 'Corners snap to the faces of walls and lines in the drawing. Hold Ctrl to place freely.', 'data-tip-side': 'top' },
     h('input', { type: 'checkbox', checked: S.snapDrawing, onchange: (e) => { S.snapDrawing = e.target.checked; } }), h('span', null, 'Snap to lines'));
-  ['tool', 'lock', 'loupe', 'docLoaded', 'selection', 'rect', 'scale', 'dimstep'].forEach((e) => on(e, render));
+  ['tool', 'lock', 'loupe', 'docLoaded', 'selection', 'rect', 'scale', 'dimstep', 'prefs'].forEach((e) => on(e, render));
   on('doc', () => { if (S.tool === 'gap' || S.tool === 'dim' || S.tool === 'calib' || S.tool === 'polygon' || S.tool === 'rect') render(); });
   render();
 }
@@ -395,6 +401,16 @@ async function start() {
     openMarkups: () => openMarkupsWindow(windowActions()),
   });
   initTools($('ui'), hooks);
+  // Preferences changed (here or in another tab): what new work starts with applies at once
+  onPrefs((p, before) => {
+    if (p.newWork !== before.newWork) {
+      const w = p.newWork;
+      S.style = { ...S.style, opacity: w.opacity, borderPt: w.borderPt, borderStyle: w.borderStyle, cover: w.cover };
+      S.fill = { ...S.fill, tol: w.fillTol, gaps: w.fillGaps, cover: w.fillCover, autoName: w.autoName };
+      emit('style');
+    }
+    emit('prefs');
+  });
   initIO();
   initCovers();
   initCloseFlow();
@@ -432,7 +448,7 @@ async function start() {
     if (f) openFile(f, true);
   }
   startRecovery();
-  window.__plantint = { S, V, T, hooks, setTool, fit, emit, engine, legendRect, covers: { syncCovers, coversIdle }, markupsWin: { open: () => openMarkupsWindow(windowActions()), isOpen: markupsWindowOpen }, merge: { mergeSelected }, revealIds, writeRecovery, measure, annot, units, legend: { legendLayout, legendRows, legendRect }, progress: { progressSummary, progOf }, pins: { pinSize, PIN_MIN_CSS } }; // used by the automated tests
+  window.__plantint = { S, V, T, hooks, setTool, fit, emit, engine, legendRect, covers: { syncCovers, coversIdle }, markupsWin: { open: () => openMarkupsWindow(windowActions()), isOpen: markupsWindowOpen }, merge: { mergeSelected }, revealIds, prefs: { get: prefs, set: setPrefs, reset: resetPrefs, keys }, writeRecovery, measure, annot, units, legend: { legendLayout, legendRows, legendRect }, progress: { progressSummary, progOf }, pins: { pinSize, PIN_MIN_CSS } }; // used by the automated tests
 }
 
 start();

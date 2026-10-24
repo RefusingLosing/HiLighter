@@ -29,8 +29,12 @@ export async function drawingPage(app, timeout = 60000) {
   throw new Error('no drawing page opened');
 }
 
-export async function launch(file, { clearRecovery = true } = {}) {
+// the interface size PlanTint keeps for its next start (Preferences)
+export const UI_STATE_FILE = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'PlanTint', 'ui.json');
+
+export async function launch(file, { clearRecovery = true, keepPrefs = false } = {}) {
   if (clearRecovery) fs.rmSync(RECOVERY_DIR, { recursive: true, force: true });
+  if (!keepPrefs) fs.rmSync(UI_STATE_FILE, { force: true });
   const app = await electron.launch({
     executablePath: require('electron'),
     args: ['--no-sandbox', path.join(ROOT, 'dist/app'), ...(file ? [file] : [])],
@@ -43,6 +47,11 @@ export async function launch(file, { clearRecovery = true } = {}) {
   page.on('pageerror', (e) => errors.push('pageerror: ' + (e.stack || e.message)));
   await page.waitForLoadState('domcontentloaded');
   await page.setViewportSize({ width: 1600, height: 960 }).catch(() => {});
+  // every test starts with PlanTint's own preferences, unless it is checking that they are kept
+  if (!keepPrefs && await page.evaluate(() => { try { return !!localStorage.getItem('plantint.prefs'); } catch { return false; } }).catch(() => false)) {
+    await page.waitForFunction(() => window.__plantint && window.__plantint.prefs, null, { timeout: 60000 });
+    await page.evaluate(() => window.__plantint.prefs.reset());
+  }
   return { app, page, errors };
 }
 

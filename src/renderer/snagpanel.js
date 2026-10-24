@@ -229,7 +229,7 @@ export function buildSnags(acts) {
   const sum = h('span', { class: 'ms-sum', id: 'sn-sum' });
   const head = h('button', { class: 'sec-head ms-head', id: 'sn-head', 'aria-expanded': String(open), onclick: () => setOpen(!open) },
     chev, h('span', { class: 'sec-title' }, 'Snags'), sum);
-  const addBtn = h('button', { class: 'btn small', id: 'sn-add', 'data-tip': 'Then click the sheet where the snag is', 'data-key': 'X', 'data-tip-side': 'top', onclick: () => actions.setTool('pin') });
+  const addBtn = h('button', { class: 'btn small', id: 'sn-add', 'data-tip': 'Then click the sheet where the snag is', 'data-act': 'tool.pin', 'data-tip-side': 'top', onclick: () => actions.setTool('pin') });
   addBtn.innerHTML = icon('map-pin', 14) + '<span>Add pin</span>';
   const fil = h('div', { class: 'segs sn-filter', id: 'sn-filter' }, ...[['all', 'All'], ...PIN_STATUSES.map((x) => [x.id, x.label])].map(([v, label]) => h('button', {
     class: 'seg', 'data-v': v, onclick: () => { filter = v; refreshSnags(); },

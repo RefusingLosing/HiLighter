@@ -28,4 +28,6 @@ contextBridge.exposeInMainWorld('plantint', {
   recoveryRead: () => ipcRenderer.invoke('recovery:read'),
   recoveryClear: () => ipcRenderer.invoke('recovery:clear'),
   markupsCover: () => ipcRenderer.invoke('markups:cover'),
+  setUiZoom: (z) => ipcRenderer.send('ui:zoom', z),
+  getUiZoom: () => ipcRenderer.invoke('ui:zoom-get'),
 });

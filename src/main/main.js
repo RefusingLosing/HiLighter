@@ -12,7 +12,16 @@ const fs = require('fs');
 
 const RENDERER_DIR = path.join(__dirname, 'renderer');
 const OPENABLE = ['.pdf', '.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.gif', '.webp', '.plantint'];
-const STRIP_H = 44; // the tab strip is the row of the window buttons
+const STRIP_H = 44; // the tab strip is the row of the window buttons (at interface size 100%)
+
+// Interface size (Preferences): every page of the app is zoomed by it (they share an origin, so one zoom
+// reaches them all), and the tab strip grows with it.
+let uiZoom = 1;
+const uiStateFile = () => path.join(app.getPath('userData'), 'ui.json');
+const stripH = () => Math.round(STRIP_H * uiZoom);
+function loadUiZoom() {
+  try { const z = Number(JSON.parse(fs.readFileSync(uiStateFile(), 'utf8')).zoom); if (z >= 0.8 && z <= 1.5) uiZoom = z; } catch { /* 100% */ }
+}
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true, codeCache: true } },
@@ -97,7 +106,7 @@ function createWindow(startupPath = null) {
     title: 'PlanTint',
     icon: path.join(__dirname, 'icon.png'),
     titleBarStyle: 'hidden',
-    titleBarOverlay: { color: '#F3F4F1', symbolColor: '#2B302D', height: STRIP_H },
+    titleBarOverlay: { color: '#F3F4F1', symbolColor: '#2B302D', height: stripH() },
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -136,6 +145,7 @@ function createWindow(startupPath = null) {
     }
     wins.delete(winId);
   });
+  win.webContents.on('did-finish-load', () => { if (uiZoom !== 1) applyUiZoom(rec); });
   win.loadURL('app://bundle/tabs.html');
   addTab(rec, startupPath);
   return win;
@@ -196,6 +206,7 @@ function addTab(rec, startupPath = null) {
     });
     if (r === 0) { if (!wc.isDestroyed()) wc.reload(); } else removeTab(t);
   });
+  wc.on('did-finish-load', () => { if (uiZoom !== 1 && !wc.isDestroyed()) wc.setZoomFactor(uiZoom); });
   wc.loadURL('app://bundle/index.html');
   activate(t);
   return t;
@@ -260,7 +271,7 @@ function saveMarkupsWindowBounds(b) {
 function layout(rec) {
   if (!rec.active || rec.win.isDestroyed() || rec.win.isMinimized()) return;
   const [w, h] = rec.win.getContentSize();
-  rec.active.view.setBounds({ x: 0, y: STRIP_H, width: w, height: Math.max(0, h - STRIP_H) });
+  rec.active.view.setBounds({ x: 0, y: stripH(), width: w, height: Math.max(0, h - stripH()) });
 }
 
 /** Tells the strip which tabs there are and which one is shown. */
@@ -365,6 +376,7 @@ function removeTab(t) {
 }
 
 app.whenReady().then(() => {
+  loadUiZoom();
   // no menu bar: also removes Ctrl+R / F5 reload and Ctrl+W, which would throw away unsaved marking
   Menu.setApplicationMenu(null);
   protocol.handle('app', async (req) => {
@@ -517,6 +529,22 @@ ipcMain.on('app:set-title', (e, info) => {
   sendStrip(t.win);
 });
 ipcMain.on('shell:show', (_e, p) => { try { shell.showItemInFolder(p); } catch { /* ignore */ } });
+// Preferences: interface size for every window (kept for the next start)
+function applyUiZoom(rec) {
+  if (rec.win.isDestroyed()) return;
+  if (!rec.win.webContents.isDestroyed()) rec.win.webContents.setZoomFactor(uiZoom);
+  for (const t of rec.tabs) if (!t.view.webContents.isDestroyed()) t.view.webContents.setZoomFactor(uiZoom);
+  try { rec.win.setTitleBarOverlay({ color: '#F3F4F1', symbolColor: '#2B302D', height: stripH() }); } catch { /* not on this system */ }
+  layout(rec);
+}
+ipcMain.on('ui:zoom', (_e, z) => {
+  z = Number(z);
+  if (!(z >= 0.8 && z <= 1.5) || z === uiZoom) return;
+  uiZoom = z;
+  try { fs.writeFileSync(uiStateFile(), JSON.stringify({ zoom: z })); } catch { /* this session only */ }
+  for (const rec of wins.values()) applyUiZoom(rec);
+});
+ipcMain.handle('ui:zoom-get', () => uiZoom);
 // the part of a drawing's page that its markups window covers (page pixels), so the drawing can show a
 // markup beside the window rather than under it; null when the window is not open or not in front of it
 ipcMain.handle('markups:cover', (e) => {

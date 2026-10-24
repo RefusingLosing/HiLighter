@@ -8,7 +8,9 @@
 import { S, on, withProps, setSelection as setSel } from './state.js';
 import { change } from './history.js';
 import { icon } from './ui.js';
-import { PALETTE, tintOnPaper, colorName, normalizeHex } from './colors.js';
+import { tintOnPaper, colorName, normalizeHex } from './colors.js';
+import { favourites, onPrefs } from './prefs.js';
+import { actionOf, keyLabel } from './keys.js';
 import { measureAt, totals } from './measure.js';
 import { hasScale, areaLabel, lengthLabel } from './units.js';
 import { STATUSES, STATUS, progressOn, progressBy, progOf, withProg } from './progress.js';
@@ -50,7 +52,7 @@ export function openMarkupsWindow(acts) {
   if (!w) return null;
   win = w;
   build();
-  offs = [on('doc', later), on('selection', later), on('scale', later), on('docLoaded', () => {
+  offs = [onPrefs(() => { if (el.pal) fillPalette(el.pal); later(); }), on('doc', later), on('selection', later), on('scale', later), on('docLoaded', () => {
     // another drawing in this tab: start with everything shown
     Object.assign(view, { q: '', colour: null, status: null, sort: null, dir: 1 });
     if (el.search) el.search.value = '';
@@ -190,6 +192,12 @@ body.mw-dragging, body.mw-dragging * { cursor: grabbing !important; }
 @media (max-width: 540px) { .mw-follow .lbl { display: none; } .mw-t .c-act { display: none; } .mw-name { min-width: 110px; } .mw-top, .mw-act { padding-left: 10px; padding-right: 10px; } }
 `;
 
+/** The favourite colours (Preferences) in the bar above the table. */
+function fillPalette(pal) {
+  pal.innerHTML = '';
+  pal.append(...favourites().map((p) => E('button', { class: 'mw-sw', title: p.name, 'aria-label': p.name, style: { background: p.hex }, onclick: () => recolour(selectedIds(), p.hex) })));
+}
+
 /** An element in the window's own document (like h() in ui.js). */
 function E(tag, attrs, ...children) {
   const d = win.document;
@@ -234,8 +242,8 @@ function build() {
 
   // ---- what to do with the selected markups
   const selTitle = E('span', { class: 'mw-sel-title' });
-  const pal = E('div', { class: 'grp pal-inline needs-sel', 'aria-label': 'Colour of the selected markups' },
-    ...PALETTE.map((p) => E('button', { class: 'mw-sw', title: p.name, 'aria-label': p.name, style: { background: p.hex }, onclick: () => recolour(selectedIds(), p.hex) })));
+  const pal = E('div', { class: 'grp pal-inline needs-sel', 'aria-label': 'Colour of the selected markups' });
+  fillPalette(pal);
   const colourBtn = E('button', { class: 'mw-btn icon-ok needs-sel mw-colour', title: 'Colour of the selected markups', html: icon('swatch-book', 15) + lbl('Colour') });
   colourBtn.addEventListener('click', () => colourPop(colourBtn, selectedIds()));
   const stGrp = E('div', { class: 'grp needs-sel', 'aria-label': 'Status of the selected markups' },
@@ -250,7 +258,7 @@ function build() {
   followBox.addEventListener('change', () => { view.follow = followBox.checked; saveFollow(view.follow); });
   const followLbl = E('label', { class: 'mw-follow', title: 'A click on a row brings its markup into view on the drawing, beside this window, and makes it flash' },
     followBox, E('span', { html: icon('scan-eye', 15) }), E('span', { class: 'lbl' }, 'Show on drawing'));
-  const allBtn = E('button', { class: 'mw-btn', title: 'Select every markup shown in the table (Ctrl+A)', onclick: () => selectShown() }, 'Select all');
+  const allBtn = E('button', { class: 'mw-btn', title: 'Select every markup shown in the table', onclick: () => selectShown() }, 'Select all');
   const noneBtn = E('button', { class: 'mw-btn needs-sel', title: 'Select nothing (Esc)', onclick: () => setSelection([]) }, 'Clear');
   const act = E('div', { class: 'mw-act' }, selTitle, pal, colourBtn, stSep, stGrp, E('span', { class: 'sep' }), zoomBtn, mergeBtn, delBtn,
     E('span', { class: 'spring' }), followLbl, allBtn, noneBtn);
@@ -269,7 +277,7 @@ function build() {
   const foot = E('div', { class: 'mw-foot' }, tot, hint, msg);
 
   d.body.append(top, act, wrap, foot);
-  el = { search, colours, statuses, count, selTitle, act, stGrp, stSep, mergeBtn, followBox, thead, tbody, table, empty, wrap, tot, msg };
+  el = { search, colours, statuses, count, selTitle, act, pal, stGrp, stSep, mergeBtn, followBox, thead, tbody, table, empty, wrap, tot, msg };
 
   d.addEventListener('keydown', onKey);
   d.addEventListener('pointerdown', (e) => { if (el.pop && !el.pop.contains(e.target)) closePop(); }, true);
@@ -372,7 +380,7 @@ function refresh() {
   el.selTitle.textContent = nSel ? `${nSel} selected` : 'Nothing selected';
   const into = nSel >= 2 ? S.markups.find((m) => m.id === mergeTarget()) : null;
   el.mergeBtn.title = into
-    ? `Merge the ${nSel} selected markups into “${short(into.name)}” (the first selected in the table), which keeps its name, colour and status (Ctrl+M). Or drag a row onto another.`
+    ? `Merge the ${nSel} selected markups into “${short(into.name)}” (the first selected in the table), which keeps its name, colour and status${keyLabel('edit.merge') ? ` (${keyLabel('edit.merge')})` : ''}. Or drag a row onto another.`
     : 'Merge markups into one: select two or more, or drag a row onto another';
   el.stGrp.hidden = el.stSep.hidden = !progressOn();
   const n = S.markups.length;
@@ -785,7 +793,7 @@ function colourPop(anchorEl, ids) {
   const any = E('input', { type: 'color' });
   any.addEventListener('change', () => { recolour(ids, any.value.toUpperCase()); closePop(); });
   const pop = E('div', { class: 'mw-pop', role: 'dialog', 'aria-label': 'Colour' },
-    E('div', { class: 'pal' }, ...PALETTE.map((p) => E('button', { class: 'mw-sw', title: p.name, 'aria-label': p.name, style: { background: p.hex }, onclick: () => { recolour(ids, p.hex); closePop(); } }))),
+    E('div', { class: 'pal' }, ...favourites().map((p) => E('button', { class: 'mw-sw', title: p.name, 'aria-label': p.name, style: { background: p.hex }, onclick: () => { recolour(ids, p.hex); closePop(); } }))),
     E('div', { class: 'more' }, E('button', { class: 'mw-btn', onclick: () => any.click() }, 'Any colour…'), any,
       ids.length > 1 ? E('span', { class: 'mw-label' }, `${ids.length} markups`) : null));
   win.document.body.append(pop);
@@ -813,15 +821,17 @@ function onKey(e) {
     return;
   }
   if (typing) return;
-  const k = e.key.toLowerCase();
-  if (ctrl && k === 'a') { e.preventDefault(); selectShown(); }
-  else if (ctrl && k === 'z' && !e.shiftKey) { e.preventDefault(); actions.undo && actions.undo(); }
-  else if (ctrl && (k === 'y' || (k === 'z' && e.shiftKey))) { e.preventDefault(); actions.redo && actions.redo(); }
-  else if (ctrl && k === 'f') { e.preventDefault(); el.search.focus(); el.search.select(); }
-  else if (ctrl && (k === 'm' || e.code === 'KeyM')) { e.preventDefault(); mergeSelectedHere(); }
-  else if (ctrl && k === 'w') { e.preventDefault(); win.close(); }
-  else if (e.key === 'Delete') { e.preventDefault(); remove(selectedIds()); }
-  else if (e.key === 'F2') {
+  // the keys set in Preferences, as on the sheet; Ctrl+F and Ctrl+W are this window's own
+  const act = actionOf(e);
+  const k = e.code === 'KeyF' ? 'f' : e.code === 'KeyW' ? 'w' : e.key.toLowerCase();
+  if (act === 'edit.selectAll') { e.preventDefault(); selectShown(); }
+  else if (act === 'edit.undo') { e.preventDefault(); actions.undo && actions.undo(); }
+  else if (act === 'edit.redo') { e.preventDefault(); actions.redo && actions.redo(); }
+  else if (act === 'edit.merge') { e.preventDefault(); mergeSelectedHere(); }
+  else if (act === 'edit.delete') { e.preventDefault(); remove(selectedIds()); }
+  else if (ctrl && !e.shiftKey && k === 'f') { e.preventDefault(); el.search.focus(); el.search.select(); }
+  else if (ctrl && !e.shiftKey && k === 'w') { e.preventDefault(); win.close(); }
+  else if (act === 'edit.rename') {
     const id = (anchor && S.selection.has(anchor)) ? anchor : selectedIds()[0];
     const r = id && rows.get(id);
     if (r) { e.preventDefault(); r.cells.name.focus(); r.cells.name.select(); }

@@ -2,6 +2,8 @@
 // Markups, gap lines, the legend and raster-op lists are treated as immutable values:
 // edits always produce new objects, which makes undo snapshots cheap and safe.
 
+import { prefs, favourites, nextName } from './prefs.js';
+
 const listeners = new Map();
 export function on(evt, fn) {
   if (!listeners.has(evt)) listeners.set(evt, new Set());
@@ -47,6 +49,17 @@ export function saveMeasPrefs(m) {
  */
 export const PROGRESS_DEFAULT = Object.freeze({ on: false, by: 'area', labels: true });
 
+/** What new highlights start with (Preferences, New work): the first favourite colour and the defaults. */
+export function newWorkStyle() {
+  const w = prefs().newWork;
+  return { color: favourites()[0].hex, opacity: w.opacity, borderPt: w.borderPt, borderColor: null, borderStyle: w.borderStyle, cover: w.cover };
+}
+/** What Fill starts with (Preferences, New work). */
+export function newWorkFill() {
+  const w = prefs().newWork;
+  return { tol: w.fillTol, gaps: w.fillGaps, cover: w.fillCover, autoName: w.autoName };
+}
+
 export const S = {
   doc: null,            // see io.js: { name, path, kind, ext, bytes, pageIndex, pageCount, dpi, W, H, pageSizePt, text, paper, scale, projectPath }
   progress: PROGRESS_DEFAULT,
@@ -63,8 +76,8 @@ export const S = {
   selection: new Set(), // markup, dimension and pin ids
   legendSelected: false,
   tool: 'select',
-  style: { color: '#FFD60A', opacity: 0.45, borderPt: 0, borderColor: null, borderStyle: 'solid', cover: true },
-  fill: { tol: 25, gaps: 1, cover: true, autoName: true },
+  style: newWorkStyle(),
+  fill: newWorkFill(),
   eraser: { size: 30, mode: 'both' }, // mode: both | highlights | drawing
   lock: { mode: 'free', once: null, refIdx: -1, extRef: null },
   loupe: { on: false, power: 3 },
@@ -83,13 +96,9 @@ export function selectedMarkups() {
   return S.markups.filter((m) => S.selection.has(m.id));
 }
 
+/** The name of the next new area: the pattern from Preferences (Area 1, Area 2, ... unless changed). */
 export function nextAreaName() {
-  let max = 0;
-  for (const m of S.markups) {
-    const mm = /^Area (\d+)$/.exec(m.name || '');
-    if (mm) max = Math.max(max, +mm[1]);
-  }
-  return 'Area ' + (max + 1);
+  return nextName(S.markups.map((m) => m.name));
 }
 
 export function makeMarkup({ kind, rings, name, style }) {

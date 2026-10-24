@@ -25,7 +25,8 @@ LAYOUT
                      reports (reports.js); highlights covering colour already on the drawing
                      (covers.js); the markups window, a window of its own that the drawing
                      page fills in and keeps up to date (markupswin.js); merging markups
-                     (merge.js)
+                     (merge.js); preferences (prefs.js, kept in local storage; keys.js, the
+                     shortcuts by key position; prefsdialog.js, the gear menu and the dialog)
   src/engine/        a Web Worker that owns the drawing's pixels: renders PDFs with MuPDF,
                      decodes pictures, fill, painted-colour search (detect.js), colour
                      removal (imgproc.js unpaint), snapping (a PDF's own line geometry,
@@ -50,7 +51,8 @@ TESTS
                      t9 is the progress map and snag pins (1.5; it reads the Excel reports with openpyxl),
                      t10 is highlights covering colour already on the drawing (1.5.1),
                      t11 is the markups window (1.6), t12 is merging and the window beside
-                     the drawing (1.7)
+                     the drawing (1.7),
+                     t13 is Preferences (1.8)
     test/unit/       Node tests of units, typing lengths, visible areas and schedules
                      (measure_test.mjs), of progress, pins and the Excel writer (progress_test.mjs),
                      and of finding and taking out paint under highlights (cover_test.mjs),

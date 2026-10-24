@@ -9,7 +9,8 @@ import {
   LENGTH_UNITS, AREA_UNITS, hasScale, areaLabel, lengthLabel, fmtScale, scaleSource, lengthUnitLabel,
 } from './units.js';
 import { resetScale } from './scale.js';
-import { PALETTE, normalizeHex, tintOnPaper, borderColorOf, autoBorder } from './colors.js';
+import { normalizeHex, tintOnPaper, borderColorOf, autoBorder } from './colors.js';
+import { prefs, onPrefs, favourites } from './prefs.js';
 import { change, commit, snapshot } from './history.js';
 import { legendLimits, clampLegendSizes, bestLegendSpot } from './legend.js';
 import { requestScene, T, geo } from './render.js';
@@ -113,10 +114,7 @@ export function initPanel(root, acts) {
     h('div', { class: 'chip-border', id: 'chip-border' }),
     h('div', { class: 'chip-meta' }, h('span', { id: 'chip-hex' }), h('span', { id: 'chip-op' })));
   const pal = h('div', { class: 'palette', role: 'listbox', 'aria-label': 'Colours' });
-  for (const p of PALETTE) {
-    const b = h('button', { class: 'sw', 'data-hex': p.hex, 'data-tip': p.name, 'data-tip-side': 'top', style: { background: p.hex }, onclick: () => applyStyle('Change colour', { color: p.hex }) });
-    pal.append(b);
-  }
+  fillPalette(pal);
   const colorInput = h('input', { type: 'color', class: 'hidden-color', id: 'custom-color' });
   colorInput.addEventListener('input', () => liveApply('Change colour', { color: colorInput.value.toUpperCase() }));
   colorInput.addEventListener('change', () => endLive());
@@ -127,7 +125,7 @@ export function initPanel(root, acts) {
     if (v) applyStyle('Change colour', { color: v }); else { toast('Type a colour code like #FFD60A.'); refreshStyle(); }
   });
   const customBtn = h('button', { class: 'tool-mini', 'data-tip': 'Any colour', 'data-tip-side': 'top', onclick: () => colorInput.click(), html: icon('plus', 16) });
-  const pickBtn = h('button', { class: 'tool-mini', 'data-tip': 'Pick a colour from the sheet', 'data-key': 'I', 'data-tip-side': 'top', onclick: () => actions.setTool('pick'), html: icon('pipette', 16) });
+  const pickBtn = h('button', { class: 'tool-mini', 'data-tip': 'Pick a colour from the sheet', 'data-act': 'tool.pick', 'data-tip-side': 'top', onclick: () => actions.setTool('pick'), html: icon('pipette', 16) });
   const colorRow = h('div', { class: 'color-row' }, hexInput, customBtn, pickBtn, colorInput);
 
   const opRange = h('input', { type: 'range', min: 0, max: 100, step: 1, id: 'op-range', 'aria-label': 'Opacity' });
@@ -210,6 +208,30 @@ export function initPanel(root, acts) {
   on('docLoaded', refreshMeasure);
   on('style', refreshStyle);
   refreshStyle(); refreshList(); refreshLegend(); refreshMeasure();
+  // Preferences: favourite colours, which sections show, which side and how wide
+  applyPanelPrefs(root);
+  onPrefs((p, before) => {
+    if (p.colours !== before.colours) { fillPalette(pal); refreshStyle(); }
+    if (p.panel !== before.panel) applyPanelPrefs(root);
+  });
+}
+
+/** The favourite colours (Preferences) as the swatches of the style card. */
+function fillPalette(pal) {
+  pal.innerHTML = '';
+  for (const p of favourites()) {
+    pal.append(h('button', { class: 'sw', 'data-hex': p.hex, 'data-tip': p.name, 'data-tip-side': 'top', style: { background: p.hex }, onclick: () => applyStyle('Change colour', { color: p.hex }) }));
+  }
+}
+
+/** Which sections the panel shows, on which side of the window, and how wide (Preferences). */
+function applyPanelPrefs(root) {
+  const p = prefs().panel;
+  for (const [key, cls] of [['legend', 'no-legend'], ['meas', 'no-meas'], ['progress', 'no-progress'], ['snags', 'no-snags'], ['list', 'no-list']]) root.classList.toggle(cls, !p[key]);
+  root.style.setProperty('--panel-w', p.width + 'px');
+  const ws = root.parentElement;
+  if (ws) ws.classList.toggle('panel-left', p.side === 'left');
+  emit('panelLayout');
 }
 
 // ------------------------------------------------------------------ measurements
@@ -239,7 +261,7 @@ function buildMeasure() {
   } }, chev, h('span', { class: 'sec-title' }, 'Measurements'), sum);
 
   const scaleTxt = h('span', { class: 'ms-scale', id: 'ms-scale' });
-  const calBtn = h('button', { class: 'btn small', id: 'ms-cal', 'data-tip': 'Click both ends of a length you know, then type it', 'data-key': 'C', 'data-tip-side': 'top', onclick: () => actions.setTool('calib') }, 'Calibrate');
+  const calBtn = h('button', { class: 'btn small', id: 'ms-cal', 'data-tip': 'Click both ends of a length you know, then type it', 'data-act': 'tool.calib', 'data-tip-side': 'top', onclick: () => actions.setTool('calib') }, 'Calibrate');
   const resetBtn = h('button', { class: 'link-btn', id: 'ms-reset', onclick: () => { resetScale(); actions.requestUI(); } }, 'Reset');
 
   const sel = (id, label, items, onPick) => {
@@ -456,9 +478,9 @@ function rowFor(m) {
   if (!r) {
     const sw = h('span', { class: 'mk-sw' });
     const name = h('span', { class: 'mk-name' });
-    const pen = h('button', { class: 'mk-btn pen', 'data-tip': 'Rename', 'data-key': 'F2', 'aria-label': 'Rename', html: icon('pen-line', 15) });
+    const pen = h('button', { class: 'mk-btn pen', 'data-tip': 'Rename', 'data-act': 'edit.rename', 'aria-label': 'Rename', html: icon('pen-line', 15) });
     const loc = h('button', { class: 'mk-btn', 'data-tip': 'Zoom to it', 'aria-label': 'Zoom to it', html: icon('locate', 15) });
-    const del = h('button', { class: 'mk-btn del', 'data-tip': 'Delete', 'data-key': 'Del', 'aria-label': 'Delete', html: icon('trash-2', 15) });
+    const del = h('button', { class: 'mk-btn del', 'data-tip': 'Delete', 'data-act': 'edit.delete', 'aria-label': 'Delete', html: icon('trash-2', 15) });
     const meas = h('span', { class: 'mk-meas' });
     const el = h('div', { class: 'mk-row', role: 'option', 'data-id': m.id }, sw, name, meas, pen, loc, del);
     r = { el, sw, name, meas, pen, loc, del, m: null, mt: '', pk: false };

@@ -12,6 +12,7 @@ import { refreshList } from './panel.js';
 import { pointInRings } from './geom.js';
 import { V } from './view.js';
 import { LENGTH_UNITS, parseRealLength, fmtLengthIn, fmtNum } from './units.js';
+import { keyLabel } from './keys.js';
 
 // ------------------------------------------------------------------ page picker
 
@@ -484,8 +485,9 @@ export function chooseSaveType(defaultType, keepWork = false) {
 // ------------------------------------------------------------------ help
 
 export function showHelp() {
+  const k = (id) => keyLabel(id) || '—';
   const rows = [
-    ['Tools', [['S', 'Select and move'], ['F', 'Fill an enclosed area'], ['P', 'Polygon'], ['R', 'Rectangle'], ['G', 'Gap line (stops Fill at openings)'], ['K', 'Dimension'], ['C', 'Calibrate the scale'], ['X', 'Snag pin'], ['I', 'Pick a colour'], ['E', 'Eraser (highlights and drawing colour)'], ['M', 'Magnifier'], ['L', 'Legend on sheet'], ['D', 'Find painted colour']]],
+    ['Tools', [[k('tool.select'), 'Select and move'], [k('tool.fill'), 'Fill an enclosed area'], [k('tool.polygon'), 'Polygon'], [k('tool.rect'), 'Rectangle'], [k('tool.gap'), 'Gap line (stops Fill at openings)'], [k('tool.dim'), 'Dimension'], [k('tool.calib'), 'Calibrate the scale'], [k('tool.pin'), 'Snag pin'], [k('tool.pick'), 'Pick a colour'], [k('tool.erase'), 'Eraser (highlights and drawing colour)'], [k('view.loupe'), 'Magnifier'], [k('view.legend'), 'Legend on sheet'], [k('detect'), 'Find painted colour']]],
     ['Fill (F)', [['Click', 'Fill an enclosed area'], ['Click a fill', 'Give it the current colour'], ['Shift+click', 'Add the area to the highlight next to it (a building split by its number)'], ['Alt+click', 'Pick a colour from the sheet']]],
     ['Progress map and snag pins', [['1 2 3 0', 'Selected zones: Not started, In progress, Done, Not counted (progress map on)'], ['1 2 3', 'Selected pins: Open, Fixed, Closed'], ['X, click', 'Drop a snag pin, then type its note'], ['Double-click a pin', 'Edit its note'], ['Ctrl+V', 'Paste a photo into the selected pin'], ['Drag a pin', 'Move it']]],
     ['Dimension (K) and Calibrate (C)', [['Click, click', 'The two points to measure between'], ['Click again', 'Where the dimension line goes (Enter: on the points)'], ['Shift', 'Horizontal or vertical'], ['Ctrl', 'Hold to stop snapping'], ['Backspace', 'Back one step'], ['Drag an end', 'Move a point of a selected dimension'], ['Drag the dot', 'Move the dimension line'], ['Calibrate', 'Click both ends of a known length, then type it']]],
@@ -493,13 +495,13 @@ export function showHelp() {
     ['Rectangle', [['Click, click', 'First corner, then the opposite corner'], ['Drag', 'Corner to corner'], ['Type a number', 'Exact width and height after the first corner'], ['Tab', 'Switch between width and height'], ['Shift', 'Keep it square'], ['Ctrl', 'Hold to stop snapping to walls and lines']]],
     ['Eraser', [['Drag', 'Erase colour under the brush'], ['Shift+click', 'Remove a whole markup or coloured area'], ['[ and ]', 'Smaller / larger brush'], ['Right-click', 'Remove colour in this area of the drawing']]],
     ['Painted colour (D)', [['Click an outline', 'Leave that area out, or add it back'], ['Pick button', 'Find a colour you click (greys too)'], ['Esc', 'Stop picking, or close the panel']]],
-    ['Selecting and editing', [['Click', 'Select a markup'], ['Shift+click', 'Add to the selection'], ['Ctrl+click', 'Add or remove'], ['Drag right', 'Select markups fully inside the box'], ['Drag left', 'Select markups the box touches'], ['Shift+click in list', 'Select a range'], ['Window button (list)', 'All markups in a window beside the drawing, to find, select and change them'], ['Ctrl+M', 'Merge the selected markups into one (or right-click: Merge into)'], ['Drag a row onto another', 'Merge them, in the markups window'], ['Arrows', 'Nudge (Shift: 10×)'], ['Double-click edge', 'Add a corner'], ['F2', 'Rename'], ['Ctrl+D', 'Duplicate'], ['Del', 'Delete']]],
-    ['View and file', [['Wheel', 'Zoom at the pointer'], ['Space+drag', 'Pan (or middle mouse)'], ['Ctrl+0', 'Fit the sheet'], ['Ctrl+1', 'Real size'], ['Alt+wheel', 'Magnifier strength'], ['Ctrl+Z / Ctrl+Y', 'Undo / Redo'], ['Ctrl+S', 'Save'], ['Ctrl+Shift+S', 'Save as another file type'], ['Ctrl+O', 'Open (in a new tab when this one has a drawing)'], ['Ctrl+N', 'New tab, for a second drawing'], ['Ctrl+W', 'Close this tab'], ['Ctrl+Tab', 'Next tab (Ctrl+Shift+Tab: previous)']]],
+    ['Selecting and editing', [['Click', 'Select a markup'], ['Shift+click', 'Add to the selection'], ['Ctrl+click', 'Add or remove'], ['Drag right', 'Select markups fully inside the box'], ['Drag left', 'Select markups the box touches'], ['Shift+click in list', 'Select a range'], ['Window button (list)', 'All markups in a window beside the drawing, to find, select and change them'], [k('edit.merge'), 'Merge the selected markups into one (or right-click: Merge into)'], ['Drag a row onto another', 'Merge them, in the markups window'], ['Arrows', 'Nudge (Shift: 10×)'], ['Double-click edge', 'Add a corner'], [k('edit.rename'), 'Rename'], [k('edit.duplicate'), 'Duplicate'], [k('edit.delete'), 'Delete']]],
+    ['View and file', [['Wheel', 'Zoom at the pointer'], ['Space+drag', 'Pan (or middle mouse)'], [k('view.fit'), 'Fit the sheet'], [k('view.real'), 'Real size'], ['Alt+wheel', 'Magnifier strength'], [`${k('edit.undo')} / ${k('edit.redo')}`, 'Undo / Redo'], [k('file.save'), 'Save'], [k('file.saveAs'), 'Save as another file type'], [k('file.open'), 'Open (in a new tab when this one has a drawing)'], [k('prefs'), 'Preferences: your own keys, colours, side panel and more'], ['Ctrl+N', 'New tab, for a second drawing'], ['Ctrl+W', 'Close this tab'], ['Ctrl+Tab', 'Next tab (Ctrl+Shift+Tab: previous)']]],
   ];
   const body = h('div', null,
     h('div', { class: 'help-grid' }, ...rows.map(([t, items]) => h('section', null,
       h('h3', null, t),
       h('dl', null, ...items.flatMap(([k, v]) => [h('dt', null, h('kbd', null, k)), h('dd', null, v)]))))),
-    h('p', { class: 'about' }, 'PlanTint 1.7.2. Built with Electron, MuPDF (AGPL), Clipper, UTIF, fflate, IBM Plex fonts (OFL) and Lucide icons (ISC). The full source is included with this copy.'));
+    h('p', { class: 'about' }, 'PlanTint 1.8.0. Built with Electron, MuPDF (AGPL), Clipper, UTIF, fflate, IBM Plex fonts (OFL) and Lucide icons (ISC). The full source is included with this copy.'));
   return modal({ title: 'Keys and mouse', body, wide: true, buttons: [{ label: 'Close', value: true, primary: true }] });
 }

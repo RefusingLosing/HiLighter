@@ -1,6 +1,7 @@
 // Small DOM toolkit: element builder, icons, tooltips, toasts, menus, modals, busy overlay.
 
 import { ICONS } from './icons.gen.js';
+import { keyLabel } from './keys.js';
 
 export function h(tag, attrs, ...children) {
   const el = document.createElement(tag);
@@ -63,7 +64,9 @@ export function initTooltips() {
 }
 function showTip(t) {
   if (!t.isConnected) return;
-  const key = t.getAttribute('data-key');
+  // data-act: an action with a key that can be changed in Preferences; data-key: a fixed key
+  const act = t.getAttribute('data-act');
+  const key = act ? keyLabel(act) : t.getAttribute('data-key');
   tipEl.innerHTML = '';
   tipEl.append(h('span', null, t.getAttribute('data-tip')));
   if (key) tipEl.append(h('kbd', null, key));
@@ -123,7 +126,8 @@ export function showMenu(x, y, items) {
     });
     b.innerHTML = (it.icon ? icon(it.icon, 16) : '<span class="ico-sp"></span>');
     b.append(h('span', { class: 'menu-label' }, it.label));
-    if (it.key) b.append(h('kbd', null, it.key));
+    const k = it.act ? keyLabel(it.act) : it.key;
+    if (k) b.append(h('kbd', null, k));
     menuEl.append(b);
   }
   layer().append(menuEl);

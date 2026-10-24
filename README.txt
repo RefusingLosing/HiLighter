@@ -1,18 +1,43 @@
-PlanTint 1.7.2
+PlanTint 1.8.0
 Highlighting and measuring for architectural and technical drawings.
 
 INSTALL
-  PlanTint-Setup-1.7.2.exe
+  PlanTint-Setup-1.8.0.exe
       Installs for your Windows user only (no admin rights needed), adds Start menu and
       desktop shortcuts, and opens .plantint project files when you double-click them.
       Recommended. Installing over an earlier version keeps your settings.
 
-  PlanTint-1.7.2-portable.exe
+  PlanTint-1.8.0-portable.exe
       One file, nothing installed. It unpacks itself each time, so it starts a few
       seconds slower than the installed version.
 
   The program is not code-signed, so Windows may show "Windows protected your PC".
   Click "More info", then "Run anyway".
+
+WHAT'S NEW IN 1.8: PREFERENCES
+  The gear button at the top right opens a menu: the pages of Preferences, and one-click
+  switches for the sections of the side panel. Ctrl+, opens Preferences. Every change
+  applies at once, in every tab, and is kept for the next start.
+  - Shortcuts: click an action's key, then press the new key (with Ctrl, Alt or Shift if
+    you like). A key another action had moves over, and PlanTint says so; keys that keep
+    their own meaning (Esc, Enter, arrows, polygon keys, 1 2 3 0, tab keys) are refused.
+    The × leaves an action without a key; the arrow brings back its usual key. Tooltips,
+    menus, hints and the help sheet show your keys. The markups window follows them too.
+    Shortcuts now go by where a key is on the keyboard, so they also work with the
+    keyboard set to Arabic (or any other language).
+  - Favourite colours: the colours of the side panel and the markups window. Add, change,
+    name, move and remove them (up to 24). New highlights start with the first one.
+  - Side panel: show or hide Legend on sheet, Measurements, Progress map, Snags and the
+    Markups list; put the panel on the left or the right; set its width (260 to 480 px).
+    A hidden section keeps working. With the list hidden, the markups window opens from
+    the gear menu (or a key you give it).
+  - New highlights and Fill: what new work starts with: opacity, border, border line,
+    covering colour already on the drawing; Fill's colour tolerance, gap closing, cover
+    furniture and labels as names.
+  - Names of new areas: a pattern such as B-001, B-002 or V1, V2: the text before and
+    after the number, the first number and how many digits.
+  - Interface size: 90% to 140%, for every window (the drawing itself does not change).
+  - Reset all preferences brings everything back to how PlanTint comes.
 
 WHAT'S NEW IN 1.7.2
   Merging no longer fills anything in between: merged areas keep their own shapes and become
@@ -295,10 +320,10 @@ GOOD TO KNOW
   - If a fill would spill over most of the sheet, PlanTint asks before filling.
   - Pictures saved from PlanTint keep the drawing's resolution and print size.
   - Unsaved work is copied every 90 seconds and offered back after a crash.
-  - Projects saved by 1.0 to 1.6 open in 1.7 (a scale typed in 1.1 is kept).
+  - Projects saved by 1.0 to 1.7 open in 1.8 (a scale typed in 1.1 is kept).
 
 LICENCES
   PlanTint uses Electron (MIT), MuPDF (AGPL-3.0), Clipper (Boost), UTIF (MIT),
   fflate (MIT), IBM Plex fonts (SIL OFL) and Lucide icons (ISC).
   Because MuPDF is AGPL, the complete source of this program is included in
-  PlanTint-1.7.2-source.zip.
+  PlanTint-1.8.0-source.zip.
