@@ -31,7 +31,8 @@ LAYOUT
                      removal (imgproc.js unpaint), snapping (a PDF's own line geometry,
                      else the edges of the ink), and every export (PNG, JPEG, PDF)
   src/shared/        code used by both: border line styles (linestyle.js)
-  assets/            icons (tools/make_icons.py draws them)
+  assets/            icons (tools/make_icons.py draws them), and installer.nsh: additions to
+                     the Windows installer (one progress bar for the whole installation)
   build.mjs          esbuild bundling, icon set, fonts, MuPDF files
 
 TESTS
